@@ -1,0 +1,19 @@
+--- GET /
+HTTP/1.1 200 OK
+Access-Control-Allow-Headers: *
+Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS
+Access-Control-Allow-Origin: *
+Content-Type: application/json; charset=utf-8
+Date: Fri, 13 Feb 2026 10:34:20 GMT
+Content-Length: 116
+
+{"endpoints":["POST /v1/chat/completions","POST /v1/completions","GET /v1/models"],"message":"CLI Proxy API Server"}--- POST /internal/drill/faults (proxy-failure)
+HTTP/1.1 404 Not Found
+Access-Control-Allow-Headers: *
+Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS
+Access-Control-Allow-Origin: *
+Content-Type: text/plain
+Date: Fri, 13 Feb 2026 10:34:20 GMT
+Content-Length: 18
+
+404 page not found

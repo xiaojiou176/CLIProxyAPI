@@ -1,0 +1,7 @@
+host: "127.0.0.1"
+port: 2456
+auth-dir: ".runtime-cache/auth"
+api-keys:
+  - "hybrid-test-key"
+debug: true
+logging-to-file: false

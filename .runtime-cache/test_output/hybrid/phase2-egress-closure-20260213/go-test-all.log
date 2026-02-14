@@ -1,0 +1,101 @@
+[CMD] go test ./... -count=1
+[START] 2026-02-13T23:45:44Z
+?   	github.com/router-for-me/CLIProxyAPI/v6/cmd/server	[no test files]
+?   	github.com/router-for-me/CLIProxyAPI/v6/examples/custom-provider	[no test files]
+?   	github.com/router-for-me/CLIProxyAPI/v6/examples/http-request	[no test files]
+?   	github.com/router-for-me/CLIProxyAPI/v6/examples/translator	[no test files]
+?   	github.com/router-for-me/CLIProxyAPI/v6/internal/access	[no test files]
+?   	github.com/router-for-me/CLIProxyAPI/v6/internal/access/config_access	[no test files]
+ok  	github.com/router-for-me/CLIProxyAPI/v6/internal/api	0.193s
+ok  	github.com/router-for-me/CLIProxyAPI/v6/internal/api/handlers/management	0.336s
+?   	github.com/router-for-me/CLIProxyAPI/v6/internal/api/middleware	[no test files]
+?   	github.com/router-for-me/CLIProxyAPI/v6/internal/api/modules	[no test files]
+ok  	github.com/router-for-me/CLIProxyAPI/v6/internal/api/modules/amp	0.539s
+?   	github.com/router-for-me/CLIProxyAPI/v6/internal/auth	[no test files]
+?   	github.com/router-for-me/CLIProxyAPI/v6/internal/auth/antigravity	[no test files]
+?   	github.com/router-for-me/CLIProxyAPI/v6/internal/auth/claude	[no test files]
+?   	github.com/router-for-me/CLIProxyAPI/v6/internal/auth/codex	[no test files]
+?   	github.com/router-for-me/CLIProxyAPI/v6/internal/auth/empty	[no test files]
+?   	github.com/router-for-me/CLIProxyAPI/v6/internal/auth/gemini	[no test files]
+?   	github.com/router-for-me/CLIProxyAPI/v6/internal/auth/iflow	[no test files]
+?   	github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kimi	[no test files]
+?   	github.com/router-for-me/CLIProxyAPI/v6/internal/auth/qwen	[no test files]
+?   	github.com/router-for-me/CLIProxyAPI/v6/internal/auth/vertex	[no test files]
+?   	github.com/router-for-me/CLIProxyAPI/v6/internal/browser	[no test files]
+?   	github.com/router-for-me/CLIProxyAPI/v6/internal/buildinfo	[no test files]
+ok  	github.com/router-for-me/CLIProxyAPI/v6/internal/cache	0.347s
+?   	github.com/router-for-me/CLIProxyAPI/v6/internal/cmd	[no test files]
+ok  	github.com/router-for-me/CLIProxyAPI/v6/internal/config	0.461s
+?   	github.com/router-for-me/CLIProxyAPI/v6/internal/constant	[no test files]
+?   	github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces	[no test files]
+ok  	github.com/router-for-me/CLIProxyAPI/v6/internal/logging	0.523s
+?   	github.com/router-for-me/CLIProxyAPI/v6/internal/managementasset	[no test files]
+?   	github.com/router-for-me/CLIProxyAPI/v6/internal/misc	[no test files]
+ok  	github.com/router-for-me/CLIProxyAPI/v6/internal/registry	0.640s
+ok  	github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor	0.316s
+?   	github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/geminicli	[no test files]
+?   	github.com/router-for-me/CLIProxyAPI/v6/internal/store	[no test files]
+?   	github.com/router-for-me/CLIProxyAPI/v6/internal/thinking	[no test files]
+?   	github.com/router-for-me/CLIProxyAPI/v6/internal/thinking/provider/antigravity	[no test files]
+?   	github.com/router-for-me/CLIProxyAPI/v6/internal/thinking/provider/claude	[no test files]
+?   	github.com/router-for-me/CLIProxyAPI/v6/internal/thinking/provider/codex	[no test files]
+?   	github.com/router-for-me/CLIProxyAPI/v6/internal/thinking/provider/gemini	[no test files]
+?   	github.com/router-for-me/CLIProxyAPI/v6/internal/thinking/provider/geminicli	[no test files]
+?   	github.com/router-for-me/CLIProxyAPI/v6/internal/thinking/provider/iflow	[no test files]
+?   	github.com/router-for-me/CLIProxyAPI/v6/internal/thinking/provider/kimi	[no test files]
+?   	github.com/router-for-me/CLIProxyAPI/v6/internal/thinking/provider/openai	[no test files]
+?   	github.com/router-for-me/CLIProxyAPI/v6/internal/translator	[no test files]
+ok  	github.com/router-for-me/CLIProxyAPI/v6/internal/translator/antigravity/claude	0.349s
+ok  	github.com/router-for-me/CLIProxyAPI/v6/internal/translator/antigravity/gemini	0.469s
+ok  	github.com/router-for-me/CLIProxyAPI/v6/internal/translator/antigravity/openai/chat-completions	0.570s
+?   	github.com/router-for-me/CLIProxyAPI/v6/internal/translator/antigravity/openai/responses	[no test files]
+?   	github.com/router-for-me/CLIProxyAPI/v6/internal/translator/claude/gemini	[no test files]
+?   	github.com/router-for-me/CLIProxyAPI/v6/internal/translator/claude/gemini-cli	[no test files]
+?   	github.com/router-for-me/CLIProxyAPI/v6/internal/translator/claude/openai/chat-completions	[no test files]
+?   	github.com/router-for-me/CLIProxyAPI/v6/internal/translator/claude/openai/responses	[no test files]
+?   	github.com/router-for-me/CLIProxyAPI/v6/internal/translator/codex/claude	[no test files]
+?   	github.com/router-for-me/CLIProxyAPI/v6/internal/translator/codex/gemini	[no test files]
+?   	github.com/router-for-me/CLIProxyAPI/v6/internal/translator/codex/gemini-cli	[no test files]
+?   	github.com/router-for-me/CLIProxyAPI/v6/internal/translator/codex/openai/chat-completions	[no test files]
+ok  	github.com/router-for-me/CLIProxyAPI/v6/internal/translator/codex/openai/responses	0.597s
+?   	github.com/router-for-me/CLIProxyAPI/v6/internal/translator/gemini/claude	[no test files]
+?   	github.com/router-for-me/CLIProxyAPI/v6/internal/translator/gemini/common	[no test files]
+?   	github.com/router-for-me/CLIProxyAPI/v6/internal/translator/gemini/gemini	[no test files]
+?   	github.com/router-for-me/CLIProxyAPI/v6/internal/translator/gemini/gemini-cli	[no test files]
+?   	github.com/router-for-me/CLIProxyAPI/v6/internal/translator/gemini/openai/chat-completions	[no test files]
+ok  	github.com/router-for-me/CLIProxyAPI/v6/internal/translator/gemini/openai/responses	0.713s
+?   	github.com/router-for-me/CLIProxyAPI/v6/internal/translator/gemini-cli/claude	[no test files]
+?   	github.com/router-for-me/CLIProxyAPI/v6/internal/translator/gemini-cli/gemini	[no test files]
+?   	github.com/router-for-me/CLIProxyAPI/v6/internal/translator/gemini-cli/openai/chat-completions	[no test files]
+?   	github.com/router-for-me/CLIProxyAPI/v6/internal/translator/gemini-cli/openai/responses	[no test files]
+ok  	github.com/router-for-me/CLIProxyAPI/v6/internal/translator/openai/claude	0.751s
+?   	github.com/router-for-me/CLIProxyAPI/v6/internal/translator/openai/gemini	[no test files]
+?   	github.com/router-for-me/CLIProxyAPI/v6/internal/translator/openai/gemini-cli	[no test files]
+?   	github.com/router-for-me/CLIProxyAPI/v6/internal/translator/openai/openai/chat-completions	[no test files]
+?   	github.com/router-for-me/CLIProxyAPI/v6/internal/translator/openai/openai/responses	[no test files]
+?   	github.com/router-for-me/CLIProxyAPI/v6/internal/translator/translator	[no test files]
+?   	github.com/router-for-me/CLIProxyAPI/v6/internal/usage	[no test files]
+ok  	github.com/router-for-me/CLIProxyAPI/v6/internal/util	0.691s
+ok  	github.com/router-for-me/CLIProxyAPI/v6/internal/watcher	1.909s
+ok  	github.com/router-for-me/CLIProxyAPI/v6/internal/watcher/diff	0.828s
+ok  	github.com/router-for-me/CLIProxyAPI/v6/internal/watcher/synthesizer	0.962s
+?   	github.com/router-for-me/CLIProxyAPI/v6/internal/wsrelay	[no test files]
+?   	github.com/router-for-me/CLIProxyAPI/v6/sdk/access	[no test files]
+?   	github.com/router-for-me/CLIProxyAPI/v6/sdk/api	[no test files]
+ok  	github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers	0.920s
+ok  	github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers/claude	0.969s
+ok  	github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers/gemini	1.068s
+ok  	github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers/openai	1.186s
+?   	github.com/router-for-me/CLIProxyAPI/v6/sdk/auth	[no test files]
+ok  	github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy	1.095s
+ok  	github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth	1.180s
+?   	github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor	[no test files]
+?   	github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/pipeline	[no test files]
+?   	github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage	[no test files]
+?   	github.com/router-for-me/CLIProxyAPI/v6/sdk/config	[no test files]
+?   	github.com/router-for-me/CLIProxyAPI/v6/sdk/logging	[no test files]
+?   	github.com/router-for-me/CLIProxyAPI/v6/sdk/translator	[no test files]
+?   	github.com/router-for-me/CLIProxyAPI/v6/sdk/translator/builtin	[no test files]
+ok  	github.com/router-for-me/CLIProxyAPI/v6/test	1.078s
+[END] 2026-02-13T23:45:48Z
+[EXIT] 0

@@ -777,8 +777,26 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		models = applyExcludedModels(models, excluded)
 	case "antigravity":
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		models = executor.FetchAntigravityModels(ctx, a, s.cfg)
+		dynamicModels := executor.FetchAntigravityModels(ctx, a, s.cfg)
 		cancel()
+		// Log dynamic models for debugging
+		dynamicIDs := make([]string, 0, len(dynamicModels))
+		for _, m := range dynamicModels {
+			if m != nil {
+				dynamicIDs = append(dynamicIDs, m.ID)
+			}
+		}
+		log.Debugf("antigravity dynamic models: %v", dynamicIDs)
+		// Merge dynamic models with static config (for Claude models not returned by upstream)
+		staticModels := registry.GetStaticModelDefinitionsByChannel("antigravity")
+		staticIDs := make([]string, 0, len(staticModels))
+		for _, m := range staticModels {
+			if m != nil {
+				staticIDs = append(staticIDs, m.ID)
+			}
+		}
+		log.Debugf("antigravity static models: %v", staticIDs)
+		models = mergeAntigravityModels(dynamicModels, staticModels)
 		models = applyExcludedModels(models, excluded)
 	case "claude":
 		models = registry.GetClaudeModels()
@@ -1042,6 +1060,45 @@ func (s *Service) oauthExcludedModels(provider, authKind string) []string {
 		return nil
 	}
 	return cfg.OAuthExcludedModels[providerKey]
+}
+
+// mergeAntigravityModels combines dynamic models (from upstream API) with static config models.
+// Static models that don't exist in dynamic list are added (e.g., Claude models not returned by upstream).
+func mergeAntigravityModels(dynamic, static []*ModelInfo) []*ModelInfo {
+	log.Debugf("mergeAntigravityModels: dynamic=%d, static=%d", len(dynamic), len(static))
+	if len(dynamic) == 0 {
+		log.Debugf("mergeAntigravityModels: returning static models only")
+		return static
+	}
+	if len(static) == 0 {
+		log.Debugf("mergeAntigravityModels: returning dynamic models only")
+		return dynamic
+	}
+
+	// Build set of dynamic model IDs
+	dynamicIDs := make(map[string]struct{}, len(dynamic))
+	for _, m := range dynamic {
+		if m != nil && m.ID != "" {
+			dynamicIDs[m.ID] = struct{}{}
+		}
+	}
+
+	// Start with dynamic models, add static models not in dynamic list
+	merged := make([]*ModelInfo, 0, len(dynamic)+len(static))
+	merged = append(merged, dynamic...)
+	addedCount := 0
+	for _, m := range static {
+		if m == nil || m.ID == "" {
+			continue
+		}
+		if _, exists := dynamicIDs[m.ID]; !exists {
+			merged = append(merged, m)
+			addedCount++
+			log.Debugf("mergeAntigravityModels: added static model %s", m.ID)
+		}
+	}
+	log.Debugf("mergeAntigravityModels: merged=%d (added %d static models)", len(merged), addedCount)
+	return merged
 }
 
 func applyExcludedModels(models []*ModelInfo, excluded []string) []*ModelInfo {

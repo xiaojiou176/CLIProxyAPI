@@ -1,7 +1,11 @@
 package handlers
 
 import (
+	"fmt"
+	"net/http"
 	"reflect"
+	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -114,5 +118,127 @@ func TestGetRequestDetails_PreservesSuffix(t *testing.T) {
 				t.Fatalf("getRequestDetails() model = %v, want %v", model, tt.wantModel)
 			}
 		})
+	}
+}
+
+func TestGetRequestDetails_ModelProviderRouting_FiltersDisallowedProviders(t *testing.T) {
+	modelRegistry := registry.GetGlobalRegistry()
+	now := time.Now().Unix()
+	testToken := strings.NewReplacer("/", "-", " ", "-", "_", "-").Replace(strings.ToLower(t.Name()))
+	modelID := fmt.Sprintf("gpt-5.3-codex-routing-%s", testToken)
+
+	codexClientID := fmt.Sprintf("test-request-details-routing-codex-%s", testToken)
+	antigravityClientID := fmt.Sprintf("test-request-details-routing-antigravity-%s", testToken)
+
+	modelRegistry.RegisterClient(codexClientID, "codex", []*registry.ModelInfo{
+		{ID: modelID, Created: now + 1},
+	})
+	modelRegistry.RegisterClient(antigravityClientID, "antigravity", []*registry.ModelInfo{
+		{ID: modelID, Created: now + 2},
+	})
+	t.Cleanup(func() {
+		modelRegistry.UnregisterClient(codexClientID)
+		modelRegistry.UnregisterClient(antigravityClientID)
+	})
+
+	cfg := &sdkconfig.SDKConfig{}
+	cfg.ModelProviderRouting.Enabled = true
+	cfg.ModelProviderRouting.FamilyProviderAllowlist = map[string][]string{
+		"codex": {"codex"},
+	}
+
+	handler := NewBaseAPIHandlers(cfg, coreauth.NewManager(nil, nil, nil))
+	providers, resolvedModel, errMsg := handler.getRequestDetails(modelID)
+	if errMsg != nil {
+		t.Fatalf("getRequestDetails() unexpected error = %v", errMsg)
+	}
+	if resolvedModel != modelID {
+		t.Fatalf("getRequestDetails() model = %v, want %v", resolvedModel, modelID)
+	}
+
+	gotProviders := append([]string(nil), providers...)
+	sort.Strings(gotProviders)
+	wantProviders := []string{"codex"}
+	if !reflect.DeepEqual(gotProviders, wantProviders) {
+		t.Fatalf("getRequestDetails() providers = %v, want %v", gotProviders, wantProviders)
+	}
+}
+
+func TestGetRequestDetails_ModelProviderRouting_RejectsWhenNoAllowedProvider(t *testing.T) {
+	modelRegistry := registry.GetGlobalRegistry()
+	now := time.Now().Unix()
+	testToken := strings.NewReplacer("/", "-", " ", "-", "_", "-").Replace(strings.ToLower(t.Name()))
+	modelID := fmt.Sprintf("gpt-5.3-codex-routing-%s", testToken)
+
+	codexClientID := fmt.Sprintf("test-request-details-routing-codex-%s", testToken)
+	antigravityClientID := fmt.Sprintf("test-request-details-routing-antigravity-%s", testToken)
+
+	modelRegistry.RegisterClient(codexClientID, "codex", []*registry.ModelInfo{
+		{ID: modelID, Created: now + 1},
+	})
+	modelRegistry.RegisterClient(antigravityClientID, "antigravity", []*registry.ModelInfo{
+		{ID: modelID, Created: now + 2},
+	})
+	t.Cleanup(func() {
+		modelRegistry.UnregisterClient(codexClientID)
+		modelRegistry.UnregisterClient(antigravityClientID)
+	})
+
+	cfg := &sdkconfig.SDKConfig{}
+	cfg.ModelProviderRouting.Enabled = true
+	cfg.ModelProviderRouting.FamilyProviderAllowlist = map[string][]string{
+		"codex": {"vertex"},
+	}
+
+	handler := NewBaseAPIHandlers(cfg, coreauth.NewManager(nil, nil, nil))
+	_, _, errMsg := handler.getRequestDetails(modelID)
+	if errMsg == nil {
+		t.Fatal("getRequestDetails() expected error when all providers are filtered out, got nil")
+	}
+	if errMsg.StatusCode != http.StatusForbidden {
+		t.Fatalf("getRequestDetails() status = %d, want %d", errMsg.StatusCode, http.StatusForbidden)
+	}
+}
+
+func TestGetRequestDetails_ModelProviderRouting_UnconfiguredPreservesBehavior(t *testing.T) {
+	modelRegistry := registry.GetGlobalRegistry()
+	now := time.Now().Unix()
+	testToken := strings.NewReplacer("/", "-", " ", "-", "_", "-").Replace(strings.ToLower(t.Name()))
+	modelID := fmt.Sprintf("gpt-5.3-codex-routing-%s", testToken)
+
+	codexClientID := fmt.Sprintf("test-request-details-routing-codex-%s", testToken)
+	antigravityClientID := fmt.Sprintf("test-request-details-routing-antigravity-%s", testToken)
+
+	modelRegistry.RegisterClient(codexClientID, "codex", []*registry.ModelInfo{
+		{ID: modelID, Created: now + 1},
+	})
+	modelRegistry.RegisterClient(antigravityClientID, "antigravity", []*registry.ModelInfo{
+		{ID: modelID, Created: now + 2},
+	})
+	t.Cleanup(func() {
+		modelRegistry.UnregisterClient(codexClientID)
+		modelRegistry.UnregisterClient(antigravityClientID)
+	})
+
+	cfg := &sdkconfig.SDKConfig{}
+	cfg.ModelProviderRouting.Enabled = false
+	cfg.ModelProviderRouting.FamilyProviderAllowlist = map[string][]string{
+		modelID: {"codex"},
+	}
+
+	handler := NewBaseAPIHandlers(cfg, coreauth.NewManager(nil, nil, nil))
+	providers, resolvedModel, errMsg := handler.getRequestDetails(modelID)
+	if errMsg != nil {
+		t.Fatalf("getRequestDetails() unexpected error = %v", errMsg)
+	}
+	if resolvedModel != modelID {
+		t.Fatalf("getRequestDetails() model = %v, want %v", resolvedModel, modelID)
+	}
+
+	gotProviders := append([]string(nil), providers...)
+	sort.Strings(gotProviders)
+	wantProviders := []string{"antigravity", "codex"}
+	if !reflect.DeepEqual(gotProviders, wantProviders) {
+		t.Fatalf("getRequestDetails() providers = %v, want %v", gotProviders, wantProviders)
 	}
 }

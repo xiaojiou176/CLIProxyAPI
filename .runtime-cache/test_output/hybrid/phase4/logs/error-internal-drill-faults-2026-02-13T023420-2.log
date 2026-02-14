@@ -1,0 +1,22 @@
+=== REQUEST INFO ===
+Version: dev
+URL: /internal/drill/faults
+Method: POST
+Timestamp: 2026-02-13T02:34:20.522724-08:00
+
+=== HEADERS ===
+User-Agent: curl/8.7.1
+Accept: */*
+Content-Type: application/json
+Content-Length: 38
+
+=== REQUEST BODY ===
+{"scenario":"proxy-failure","count":1}
+
+=== RESPONSE ===
+Status: 404
+Access-Control-Allow-Origin: *
+Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS
+Access-Control-Allow-Headers: *
+
+

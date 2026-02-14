@@ -683,7 +683,7 @@ func updateAuthRecord(record *cliproxyauth.Auth, storage *gemini.GeminiTokenStor
 		return
 	}
 
-	finalName := gemini.CredentialFileName(storage.Email, storage.ProjectID, true)
+	finalName := gemini.CredentialFileNameForStorage(storage, false)
 
 	if record.Metadata == nil {
 		record.Metadata = make(map[string]any)

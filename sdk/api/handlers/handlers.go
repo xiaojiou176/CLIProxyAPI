@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -50,7 +51,19 @@ const idempotencyKeyMetadataKey = "idempotency_key"
 const (
 	defaultStreamingKeepAliveSeconds = 0
 	defaultStreamingBootstrapRetries = 0
+	defaultModelVisibilityNamespace  = "default"
 )
+
+var modelVisibilityNamespaceHeaders = []string{
+	"X-Model-Namespace",
+	"X-Base-URL-Namespace",
+	"X-Namespace",
+}
+
+var modelVisibilityNamespaceQueryParams = []string{
+	"namespace",
+	"model_namespace",
+}
 
 // BuildErrorResponseBody builds an OpenAI-compatible JSON error response body.
 // If errText is already valid JSON, it is returned as-is to preserve upstream error payloads.
@@ -371,6 +384,9 @@ func appendAPIResponse(c *gin.Context, data []byte) {
 // ExecuteWithAuthManager executes a non-streaming request via the core auth manager.
 // This path is the only supported execution route.
 func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) ([]byte, *interfaces.ErrorMessage) {
+	if errMsg := h.enforceModelVisibility(ctx, modelName); errMsg != nil {
+		return nil, errMsg
+	}
 	providers, normalizedModel, errMsg := h.getRequestDetails(modelName)
 	if errMsg != nil {
 		return nil, errMsg
@@ -414,6 +430,9 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 // ExecuteCountWithAuthManager executes a non-streaming request via the core auth manager.
 // This path is the only supported execution route.
 func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) ([]byte, *interfaces.ErrorMessage) {
+	if errMsg := h.enforceModelVisibility(ctx, modelName); errMsg != nil {
+		return nil, errMsg
+	}
 	providers, normalizedModel, errMsg := h.getRequestDetails(modelName)
 	if errMsg != nil {
 		return nil, errMsg
@@ -457,6 +476,12 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 // ExecuteStreamWithAuthManager executes a streaming request via the core auth manager.
 // This path is the only supported execution route.
 func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) (<-chan []byte, <-chan *interfaces.ErrorMessage) {
+	if errMsg := h.enforceModelVisibility(ctx, modelName); errMsg != nil {
+		errChan := make(chan *interfaces.ErrorMessage, 1)
+		errChan <- errMsg
+		close(errChan)
+		return nil, errChan
+	}
 	providers, normalizedModel, errMsg := h.getRequestDetails(modelName)
 	if errMsg != nil {
 		errChan := make(chan *interfaces.ErrorMessage, 1)
@@ -651,10 +676,458 @@ func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string
 	if len(providers) == 0 {
 		return nil, "", &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: fmt.Errorf("unknown provider for model %s", modelName)}
 	}
+	providers, routeErr := h.filterProvidersByModelProviderRouting(resolvedModelName, baseModel, providers)
+	if routeErr != nil {
+		return nil, "", routeErr
+	}
 
 	// The thinking suffix is preserved in the model name itself, so no
 	// metadata-based configuration passing is needed.
 	return providers, resolvedModelName, nil
+}
+
+func (h *BaseAPIHandler) filterProvidersByModelProviderRouting(modelName, baseModel string, providers []string) ([]string, *interfaces.ErrorMessage) {
+	if h == nil || h.Cfg == nil || !h.Cfg.ModelProviderRouting.Enabled {
+		return providers, nil
+	}
+	if len(providers) == 0 {
+		return providers, nil
+	}
+
+	allowlist := h.Cfg.ModelProviderRouting.FamilyProviderAllowlist
+	if len(allowlist) == 0 {
+		return nil, &interfaces.ErrorMessage{
+			StatusCode: http.StatusForbidden,
+			Error:      fmt.Errorf("model-provider-routing is enabled but family-provider-allowlist is empty"),
+		}
+	}
+
+	familyCandidates := modelProviderRoutingFamilyCandidates(baseModel, providers)
+	familyKey, allowedProviders := lookupModelProviderAllowlist(allowlist, familyCandidates)
+	if len(allowedProviders) == 0 {
+		return nil, &interfaces.ErrorMessage{
+			StatusCode: http.StatusForbidden,
+			Error: fmt.Errorf(
+				"model %q is blocked by model-provider-routing: no allowed providers configured for family candidates %v",
+				strings.TrimSpace(modelName),
+				familyCandidates,
+			),
+		}
+	}
+
+	filtered := filterProvidersByAllowlist(providers, allowedProviders)
+	if len(filtered) == 0 {
+		return nil, &interfaces.ErrorMessage{
+			StatusCode: http.StatusForbidden,
+			Error: fmt.Errorf(
+				"model %q is blocked by model-provider-routing: family %q allows %v but resolved providers are %v",
+				strings.TrimSpace(modelName),
+				familyKey,
+				allowedProviders,
+				providers,
+			),
+		}
+	}
+
+	return filtered, nil
+}
+
+func lookupModelProviderAllowlist(allowlist map[string][]string, familyCandidates []string) (familyKey string, providers []string) {
+	if len(allowlist) == 0 || len(familyCandidates) == 0 {
+		return "", nil
+	}
+	for _, candidate := range familyCandidates {
+		key := strings.ToLower(strings.TrimSpace(candidate))
+		if key == "" {
+			continue
+		}
+		if allowed, ok := allowlist[key]; ok && len(allowed) > 0 {
+			return key, allowed
+		}
+		for rawFamily, allowed := range allowlist {
+			if strings.EqualFold(strings.TrimSpace(rawFamily), key) && len(allowed) > 0 {
+				return strings.ToLower(strings.TrimSpace(rawFamily)), allowed
+			}
+		}
+	}
+	return "", nil
+}
+
+func filterProvidersByAllowlist(providers []string, allowedProviders []string) []string {
+	if len(providers) == 0 || len(allowedProviders) == 0 {
+		return nil
+	}
+	allowedSet := make(map[string]struct{}, len(allowedProviders))
+	for _, raw := range allowedProviders {
+		key := strings.ToLower(strings.TrimSpace(raw))
+		if key == "" {
+			continue
+		}
+		allowedSet[key] = struct{}{}
+	}
+	if len(allowedSet) == 0 {
+		return nil
+	}
+
+	filtered := make([]string, 0, len(providers))
+	for _, provider := range providers {
+		key := strings.ToLower(strings.TrimSpace(provider))
+		if key == "" {
+			continue
+		}
+		if _, ok := allowedSet[key]; ok {
+			filtered = append(filtered, provider)
+		}
+	}
+	return filtered
+}
+
+func modelProviderRoutingFamilyCandidates(baseModel string, providers []string) []string {
+	seen := make(map[string]struct{}, len(providers)+2)
+	out := make([]string, 0, len(providers)+2)
+	add := func(raw string) {
+		key := strings.ToLower(strings.TrimSpace(raw))
+		if key == "" {
+			return
+		}
+		if _, exists := seen[key]; exists {
+			return
+		}
+		seen[key] = struct{}{}
+		out = append(out, key)
+	}
+
+	add(modelFamilyFromModelName(baseModel))
+	for _, provider := range providers {
+		add(provider)
+		add(modelFamilyFromProvider(provider))
+	}
+	return out
+}
+
+func modelFamilyFromProvider(provider string) string {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "codex", "openai":
+		return "codex"
+	case "claude":
+		return "claude"
+	case "gemini", "gemini-cli", "vertex", "aistudio":
+		return "gemini"
+	default:
+		return ""
+	}
+}
+
+func modelFamilyFromModelName(modelName string) string {
+	normalized := strings.ToLower(strings.TrimSpace(thinking.ParseSuffix(modelName).ModelName))
+	if normalized == "" {
+		return ""
+	}
+	if idx := strings.LastIndex(normalized, "/"); idx >= 0 && idx < len(normalized)-1 {
+		normalized = normalized[idx+1:]
+	}
+
+	switch {
+	case strings.HasPrefix(normalized, "gpt-"),
+		strings.HasPrefix(normalized, "o1"),
+		strings.HasPrefix(normalized, "o3"),
+		strings.HasPrefix(normalized, "chatgpt"),
+		strings.Contains(normalized, "codex"):
+		return "codex"
+	case strings.HasPrefix(normalized, "claude"):
+		return "claude"
+	case strings.HasPrefix(normalized, "gemini"):
+		return "gemini"
+	case strings.HasPrefix(normalized, "qwen"):
+		return "qwen"
+	case strings.HasPrefix(normalized, "kimi"):
+		return "kimi"
+	case strings.HasPrefix(normalized, "glm"), strings.HasPrefix(normalized, "iflow"):
+		return "iflow"
+	default:
+		return ""
+	}
+}
+
+func (h *BaseAPIHandler) enforceModelVisibility(ctx context.Context, modelName string) *interfaces.ErrorMessage {
+	allowlist, guardEnabled, namespace := h.modelVisibilityAllowlistFromContext(ctx)
+	if !guardEnabled {
+		return nil
+	}
+
+	if len(allowlist) == 0 {
+		targetNamespace := strings.TrimSpace(namespace)
+		if targetNamespace == "" {
+			targetNamespace = defaultModelVisibilityNamespace
+		}
+		return &interfaces.ErrorMessage{
+			StatusCode: http.StatusForbidden,
+			Error:      fmt.Errorf("model visibility namespace %q has no allowed models configured", targetNamespace),
+		}
+	}
+
+	if modelVisibilityModelAllowed(modelName, allowlist) {
+		return nil
+	}
+
+	targetNamespace := strings.TrimSpace(namespace)
+	if targetNamespace == "" {
+		targetNamespace = defaultModelVisibilityNamespace
+	}
+	return &interfaces.ErrorMessage{
+		StatusCode: http.StatusForbidden,
+		Error:      fmt.Errorf("model %q is not allowed for namespace %q", strings.TrimSpace(modelName), targetNamespace),
+	}
+}
+
+// ValidateModelVisibility validates whether the requested model is visible in the request namespace.
+// It returns nil when model visibility guard is disabled or when the model is allowed.
+func (h *BaseAPIHandler) ValidateModelVisibility(c *gin.Context, modelName string) *interfaces.ErrorMessage {
+	ctx := context.Background()
+	if c != nil {
+		ctx = context.WithValue(ctx, "gin", c)
+	}
+	return h.enforceModelVisibility(ctx, modelName)
+}
+
+// FilterVisibleModels applies model-visibility allowlist filtering to model metadata.
+// When model visibility is disabled or not configured, models are returned unchanged.
+func (h *BaseAPIHandler) FilterVisibleModels(c *gin.Context, models []map[string]any) []map[string]any {
+	if len(models) == 0 {
+		return models
+	}
+	allowlist, guardEnabled, _ := h.modelVisibilityAllowlist(c)
+	if !guardEnabled {
+		return models
+	}
+	if len(allowlist) == 0 {
+		return []map[string]any{}
+	}
+
+	filtered := make([]map[string]any, 0, len(models))
+	for _, model := range models {
+		if model == nil {
+			continue
+		}
+		modelID, _ := model["id"].(string)
+		if modelID == "" {
+			if fallbackName, ok := model["name"].(string); ok {
+				modelID = fallbackName
+			}
+		}
+		if modelVisibilityModelAllowed(modelID, allowlist) {
+			filtered = append(filtered, model)
+		}
+	}
+	return filtered
+}
+
+func (h *BaseAPIHandler) modelVisibilityAllowlistFromContext(ctx context.Context) (map[string]struct{}, bool, string) {
+	if ctx == nil {
+		return h.modelVisibilityAllowlist(nil)
+	}
+	ginCtx, _ := ctx.Value("gin").(*gin.Context)
+	return h.modelVisibilityAllowlist(ginCtx)
+}
+
+func (h *BaseAPIHandler) modelVisibilityAllowlist(c *gin.Context) (map[string]struct{}, bool, string) {
+	if h == nil || h.Cfg == nil || !h.Cfg.ModelVisibility.Enabled || len(h.Cfg.ModelVisibility.Namespaces) == 0 {
+		return nil, false, ""
+	}
+
+	namespace := strings.TrimSpace(h.resolveModelVisibilityNamespace(c))
+	if namespace == "" {
+		if _, ok := h.Cfg.ModelVisibility.Namespaces[defaultModelVisibilityNamespace]; ok {
+			namespace = defaultModelVisibilityNamespace
+		} else if len(h.Cfg.ModelVisibility.Namespaces) == 1 {
+			for key := range h.Cfg.ModelVisibility.Namespaces {
+				namespace = strings.TrimSpace(key)
+				break
+			}
+		}
+	}
+
+	if namespace == "" {
+		return nil, true, ""
+	}
+
+	models, ok := lookupModelVisibilityNamespaceModels(h.Cfg.ModelVisibility.Namespaces, namespace)
+	if !ok {
+		return nil, true, namespace
+	}
+
+	allowlist := make(map[string]struct{}, len(models))
+	for _, model := range models {
+		key := strings.ToLower(strings.TrimSpace(model))
+		if key == "" {
+			continue
+		}
+		allowlist[key] = struct{}{}
+	}
+	if len(allowlist) == 0 {
+		return nil, true, namespace
+	}
+	return allowlist, true, namespace
+}
+
+func (h *BaseAPIHandler) resolveModelVisibilityNamespace(c *gin.Context) string {
+	if c == nil {
+		return ""
+	}
+	if namespace := h.resolveModelVisibilityNamespaceByHost(c); namespace != "" {
+		return namespace
+	}
+
+	for _, headerName := range modelVisibilityNamespaceHeaders {
+		if namespace := strings.TrimSpace(c.GetHeader(headerName)); namespace != "" {
+			return namespace
+		}
+	}
+	for _, queryKey := range modelVisibilityNamespaceQueryParams {
+		if namespace := strings.TrimSpace(c.Query(queryKey)); namespace != "" {
+			return namespace
+		}
+	}
+	return ""
+}
+
+func (h *BaseAPIHandler) resolveModelVisibilityNamespaceByHost(c *gin.Context) string {
+	if h == nil || h.Cfg == nil || len(h.Cfg.ModelVisibility.HostNamespaces) == 0 || c == nil {
+		return ""
+	}
+	return lookupModelVisibilityHostNamespace(h.Cfg.ModelVisibility.HostNamespaces, modelVisibilityHostCandidates(c))
+}
+
+func lookupModelVisibilityHostNamespace(hostNamespaces map[string]string, hostCandidates []string) string {
+	if len(hostNamespaces) == 0 || len(hostCandidates) == 0 {
+		return ""
+	}
+
+	normalizedMap := make(map[string]string, len(hostNamespaces))
+	for rawHost, namespace := range hostNamespaces {
+		hostKey := normalizeModelVisibilityHost(rawHost)
+		ns := strings.TrimSpace(namespace)
+		if hostKey == "" || ns == "" {
+			continue
+		}
+		normalizedMap[hostKey] = ns
+	}
+	if len(normalizedMap) == 0 {
+		return ""
+	}
+
+	for _, candidate := range hostCandidates {
+		hostKey := normalizeModelVisibilityHost(candidate)
+		if hostKey == "" {
+			continue
+		}
+		if namespace, ok := normalizedMap[hostKey]; ok {
+			return namespace
+		}
+	}
+	return ""
+}
+
+func modelVisibilityHostCandidates(c *gin.Context) []string {
+	if c == nil {
+		return nil
+	}
+	candidates := make([]string, 0, 4)
+	add := func(raw string) {
+		host := strings.TrimSpace(raw)
+		if host == "" {
+			return
+		}
+		// X-Forwarded-Host may contain a comma-separated chain.
+		if idx := strings.Index(host, ","); idx >= 0 {
+			host = strings.TrimSpace(host[:idx])
+		}
+		if host != "" {
+			candidates = append(candidates, host)
+		}
+	}
+	if c.Request != nil {
+		add(c.Request.Host)
+	}
+	add(c.GetHeader("X-Forwarded-Host"))
+	add(c.GetHeader("X-Original-Host"))
+	add(c.GetHeader("Host"))
+	return candidates
+}
+
+func normalizeModelVisibilityHost(rawHost string) string {
+	host := strings.TrimSpace(strings.ToLower(rawHost))
+	if host == "" {
+		return ""
+	}
+	if idx := strings.Index(host, "://"); idx >= 0 {
+		host = host[idx+3:]
+	}
+	if idx := strings.Index(host, "/"); idx >= 0 {
+		host = host[:idx]
+	}
+	if parsedHost, port, err := net.SplitHostPort(host); err == nil {
+		if port != "" {
+			host = parsedHost
+		}
+	}
+	host = strings.Trim(host, "[]")
+	return strings.TrimSpace(strings.ToLower(host))
+}
+
+func lookupModelVisibilityNamespaceModels(namespaces map[string][]string, namespace string) ([]string, bool) {
+	if len(namespaces) == 0 {
+		return nil, false
+	}
+	if models, ok := namespaces[namespace]; ok {
+		return models, true
+	}
+	for key, models := range namespaces {
+		if strings.EqualFold(strings.TrimSpace(key), namespace) {
+			return models, true
+		}
+	}
+	return nil, false
+}
+
+func modelVisibilityModelAllowed(modelName string, allowlist map[string]struct{}) bool {
+	if len(allowlist) == 0 {
+		return false
+	}
+	candidates := modelVisibilityCandidates(modelName)
+	for _, candidate := range candidates {
+		if _, ok := allowlist[candidate]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func modelVisibilityCandidates(modelName string) []string {
+	seen := make(map[string]struct{}, 3)
+	out := make([]string, 0, 3)
+	add := func(v string) {
+		key := strings.ToLower(strings.TrimSpace(v))
+		if key == "" {
+			return
+		}
+		if _, exists := seen[key]; exists {
+			return
+		}
+		seen[key] = struct{}{}
+		out = append(out, key)
+	}
+
+	trimmedModel := strings.TrimSpace(modelName)
+	add(trimmedModel)
+
+	resolvedModel := util.ResolveAutoModel(trimmedModel)
+	add(resolvedModel)
+
+	parsed := thinking.ParseSuffix(resolvedModel)
+	add(parsed.ModelName)
+
+	return out
 }
 
 func cloneBytes(src []byte) []byte {

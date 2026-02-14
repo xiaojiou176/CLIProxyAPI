@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -153,6 +154,62 @@ func TestFileSynthesizer_Synthesize_GeminiProviderMapping(t *testing.T) {
 
 	if auths[0].Provider != "gemini-cli" {
 		t.Errorf("gemini should be mapped to gemini-cli, got %s", auths[0].Provider)
+	}
+}
+
+func TestFileSynthesizer_Synthesize_GeminiLegacyAndNewNamesCoexist(t *testing.T) {
+	tempDir := t.TempDir()
+	email := "same@example.com"
+	projectID := "proj-a"
+
+	cases := []string{
+		"same@example.com-proj-a.json",
+		"gemini-same@example.com-proj-a-cred-b.json",
+	}
+	for _, fileName := range cases {
+		data, _ := json.Marshal(map[string]any{
+			"type":       "gemini",
+			"email":      email,
+			"project_id": projectID,
+		})
+		if err := os.WriteFile(filepath.Join(tempDir, fileName), data, 0o644); err != nil {
+			t.Fatalf("failed to write auth file %s: %v", fileName, err)
+		}
+	}
+
+	synth := NewFileSynthesizer()
+	ctx := &SynthesisContext{
+		Config:      &config.Config{},
+		AuthDir:     tempDir,
+		Now:         time.Now(),
+		IDGenerator: NewStableIDGenerator(),
+	}
+
+	auths, err := synth.Synthesize(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(auths) != 2 {
+		t.Fatalf("expected 2 auths, got %d", len(auths))
+	}
+
+	ids := make([]string, 0, len(auths))
+	for _, auth := range auths {
+		if auth.Provider != "gemini-cli" {
+			t.Fatalf("auth provider = %s, want gemini-cli", auth.Provider)
+		}
+		if auth.Label != email {
+			t.Fatalf("auth label = %s, want %s", auth.Label, email)
+		}
+		ids = append(ids, auth.ID)
+	}
+	sort.Strings(ids)
+	gotSet := map[string]struct{}{ids[0]: {}, ids[1]: {}}
+	if _, ok := gotSet[cases[0]]; !ok {
+		t.Fatalf("legacy name missing, ids=%v", ids)
+	}
+	if _, ok := gotSet[cases[1]]; !ok {
+		t.Fatalf("new name missing, ids=%v", ids)
 	}
 }
 

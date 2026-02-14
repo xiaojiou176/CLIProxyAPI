@@ -1,0 +1,12 @@
+=== RUN   TestFileTokenStore_SaveGeminiSameEmailProject_MultipleFilesDoNotOverwrite
+=== PAUSE TestFileTokenStore_SaveGeminiSameEmailProject_MultipleFilesDoNotOverwrite
+=== RUN   TestFileTokenStore_List_ReadsLegacyGeminiFileName
+=== PAUSE TestFileTokenStore_List_ReadsLegacyGeminiFileName
+=== CONT  TestFileTokenStore_SaveGeminiSameEmailProject_MultipleFilesDoNotOverwrite
+=== CONT  TestFileTokenStore_List_ReadsLegacyGeminiFileName
+Saving credentials to /var/folders/9p/pyr7y33x3_sd4ytlkpp74dnw0000gn/T/TestFileTokenStore_SaveGeminiSameEmailProject_MultipleFilesDoNot2290273974/001/same@example.com-proj-a.json
+Saving credentials to /var/folders/9p/pyr7y33x3_sd4ytlkpp74dnw0000gn/T/TestFileTokenStore_SaveGeminiSameEmailProject_MultipleFilesDoNot2290273974/001/gemini-same@example.com-proj-a-cred-b.json
+--- PASS: TestFileTokenStore_SaveGeminiSameEmailProject_MultipleFilesDoNotOverwrite (0.00s)
+--- PASS: TestFileTokenStore_List_ReadsLegacyGeminiFileName (0.00s)
+PASS
+ok  	github.com/router-for-me/CLIProxyAPI/v6/sdk/auth	0.196s

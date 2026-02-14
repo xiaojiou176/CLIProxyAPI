@@ -1,0 +1,4 @@
+[CMD] go build ./cmd/server
+[START] 2026-02-13T23:45:48Z
+[END] 2026-02-13T23:45:50Z
+[EXIT] 0

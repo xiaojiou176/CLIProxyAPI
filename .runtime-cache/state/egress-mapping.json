@@ -1,0 +1,186 @@
+{
+  "version": 1,
+  "updated_at": "2026-02-14T04:28:35.182146Z",
+  "accounts": {
+    "antigravity-terry@casium.com.json": {
+      "proxy_identity": "http://127.0.0.1:8889",
+      "proxy_digest": "9047832157a2239cd0d613344029537d34a42d2059c6cd358a2699c68c88d27c",
+      "first_seen_at": "2026-02-14T03:25:50.041675Z",
+      "last_seen_at": "2026-02-14T04:28:18.628337Z",
+      "drift_count": 0,
+      "last_drift_at": "0001-01-01T00:00:00Z",
+      "last_provider": "antigravity",
+      "last_model": "gemini-claude-opus-4-6-thinking"
+    },
+    "codex-1d155e15-chatgpt71@xiaojiou176.me-team.json": {
+      "proxy_identity": "direct",
+      "proxy_digest": "d15690f08a575024650b01ffac892cfd2b93e6c57c140f1b6d9e47753cabd579",
+      "first_seen_at": "2026-02-14T02:47:13.129357Z",
+      "last_seen_at": "2026-02-14T04:28:28.444409Z",
+      "drift_count": 0,
+      "last_drift_at": "0001-01-01T00:00:00Z",
+      "last_provider": "codex",
+      "last_model": "gpt-5.2-codex"
+    },
+    "codex-1d155e15-chatgpt72@xiaojiou176.me-team.json": {
+      "proxy_identity": "direct",
+      "proxy_digest": "d15690f08a575024650b01ffac892cfd2b93e6c57c140f1b6d9e47753cabd579",
+      "first_seen_at": "2026-02-14T02:47:30.033594Z",
+      "last_seen_at": "2026-02-14T02:48:43.765764Z",
+      "drift_count": 0,
+      "last_drift_at": "0001-01-01T00:00:00Z",
+      "last_provider": "codex",
+      "last_model": "gpt-5.3-codex"
+    },
+    "codex-1d155e15-chatgpt73@xiaojiou176.me-team.json": {
+      "proxy_identity": "direct",
+      "proxy_digest": "d15690f08a575024650b01ffac892cfd2b93e6c57c140f1b6d9e47753cabd579",
+      "first_seen_at": "2026-02-14T02:47:38.844048Z",
+      "last_seen_at": "2026-02-14T04:28:28.611025Z",
+      "drift_count": 0,
+      "last_drift_at": "0001-01-01T00:00:00Z",
+      "last_provider": "codex",
+      "last_model": "gpt-5.2-codex"
+    },
+    "codex-1d155e15-chatgpt74@xiaojiou176.me-team.json": {
+      "proxy_identity": "direct",
+      "proxy_digest": "d15690f08a575024650b01ffac892cfd2b93e6c57c140f1b6d9e47753cabd579",
+      "first_seen_at": "2026-02-14T02:47:47.613369Z",
+      "last_seen_at": "2026-02-14T02:49:04.393274Z",
+      "drift_count": 0,
+      "last_drift_at": "0001-01-01T00:00:00Z",
+      "last_provider": "codex",
+      "last_model": "gpt-5.3-codex"
+    },
+    "codex-1d155e15-chatgpt75@xiaojiou176.me-team.json": {
+      "proxy_identity": "direct",
+      "proxy_digest": "d15690f08a575024650b01ffac892cfd2b93e6c57c140f1b6d9e47753cabd579",
+      "first_seen_at": "2026-02-14T02:47:56.92723Z",
+      "last_seen_at": "2026-02-14T04:28:29.632606Z",
+      "drift_count": 0,
+      "last_drift_at": "0001-01-01T00:00:00Z",
+      "last_provider": "codex",
+      "last_model": "gpt-5.2-codex"
+    },
+    "codex-21e0e680-chatgpt66@xiaojiou176.me-team.json": {
+      "proxy_identity": "direct",
+      "proxy_digest": "d15690f08a575024650b01ffac892cfd2b93e6c57c140f1b6d9e47753cabd579",
+      "first_seen_at": "2026-02-14T02:48:11.051307Z",
+      "last_seen_at": "2026-02-14T02:49:27.901358Z",
+      "drift_count": 0,
+      "last_drift_at": "0001-01-01T00:00:00Z",
+      "last_provider": "codex",
+      "last_model": "gpt-5.3-codex"
+    },
+    "codex-21e0e680-chatgpt67@xiaojiou176.me-team.json": {
+      "proxy_identity": "direct",
+      "proxy_digest": "d15690f08a575024650b01ffac892cfd2b93e6c57c140f1b6d9e47753cabd579",
+      "first_seen_at": "2026-02-14T04:28:30.362151Z",
+      "last_seen_at": "2026-02-14T04:28:30.362151Z",
+      "drift_count": 0,
+      "last_drift_at": "0001-01-01T00:00:00Z",
+      "last_provider": "codex",
+      "last_model": "gpt-5.2-codex"
+    },
+    "codex-98ab2d9d-chatgpt11@xiaojiou176.me-team.json": {
+      "proxy_identity": "direct",
+      "proxy_digest": "d15690f08a575024650b01ffac892cfd2b93e6c57c140f1b6d9e47753cabd579",
+      "first_seen_at": "2026-02-14T02:48:11.190014Z",
+      "last_seen_at": "2026-02-14T02:49:28.05983Z",
+      "drift_count": 0,
+      "last_drift_at": "0001-01-01T00:00:00Z",
+      "last_provider": "codex",
+      "last_model": "gpt-5.3-codex"
+    },
+    "codex-98ab2d9d-chatgpt12@xiaojiou176.me-team.json": {
+      "proxy_identity": "direct",
+      "proxy_digest": "d15690f08a575024650b01ffac892cfd2b93e6c57c140f1b6d9e47753cabd579",
+      "first_seen_at": "2026-02-14T02:48:22.327218Z",
+      "last_seen_at": "2026-02-14T04:28:31.503461Z",
+      "drift_count": 0,
+      "last_drift_at": "0001-01-01T00:00:00Z",
+      "last_provider": "codex",
+      "last_model": "gpt-5.2-codex"
+    },
+    "codex-98ab2d9d-chatgpt13@xiaojiou176.me-team.json": {
+      "proxy_identity": "direct",
+      "proxy_digest": "d15690f08a575024650b01ffac892cfd2b93e6c57c140f1b6d9e47753cabd579",
+      "first_seen_at": "2026-02-14T02:49:48.072844Z",
+      "last_seen_at": "2026-02-14T02:49:48.072844Z",
+      "drift_count": 0,
+      "last_drift_at": "0001-01-01T00:00:00Z",
+      "last_provider": "codex",
+      "last_model": "gpt-5.3-codex"
+    },
+    "codex-98ab2d9d-chatgpt14@xiaojiou176.me-team.json": {
+      "proxy_identity": "direct",
+      "proxy_digest": "d15690f08a575024650b01ffac892cfd2b93e6c57c140f1b6d9e47753cabd579",
+      "first_seen_at": "2026-02-14T02:50:00.690933Z",
+      "last_seen_at": "2026-02-14T04:28:32.739412Z",
+      "drift_count": 0,
+      "last_drift_at": "0001-01-01T00:00:00Z",
+      "last_provider": "codex",
+      "last_model": "gpt-5.2-codex"
+    },
+    "codex-98ab2d9d-chatgpt15@xiaojiou176.me-team.json": {
+      "proxy_identity": "direct",
+      "proxy_digest": "d15690f08a575024650b01ffac892cfd2b93e6c57c140f1b6d9e47753cabd579",
+      "first_seen_at": "2026-02-14T02:50:23.480715Z",
+      "last_seen_at": "2026-02-14T02:50:23.480715Z",
+      "drift_count": 0,
+      "last_drift_at": "0001-01-01T00:00:00Z",
+      "last_provider": "codex",
+      "last_model": "gpt-5.3-codex"
+    },
+    "codex-9e67bf64-chatgpt56@xiaojiou176.me-team.json": {
+      "proxy_identity": "direct",
+      "proxy_digest": "d15690f08a575024650b01ffac892cfd2b93e6c57c140f1b6d9e47753cabd579",
+      "first_seen_at": "2026-02-14T02:50:40.718267Z",
+      "last_seen_at": "2026-02-14T04:28:33.284671Z",
+      "drift_count": 0,
+      "last_drift_at": "0001-01-01T00:00:00Z",
+      "last_provider": "codex",
+      "last_model": "gpt-5.2-codex"
+    },
+    "codex-9e67bf64-chatgpt57@xiaojiou176.me-team.json": {
+      "proxy_identity": "direct",
+      "proxy_digest": "d15690f08a575024650b01ffac892cfd2b93e6c57c140f1b6d9e47753cabd579",
+      "first_seen_at": "2026-02-14T02:50:50.962697Z",
+      "last_seen_at": "2026-02-14T02:50:50.962697Z",
+      "drift_count": 0,
+      "last_drift_at": "0001-01-01T00:00:00Z",
+      "last_provider": "codex",
+      "last_model": "gpt-5.3-codex"
+    },
+    "codex-9e67bf64-chatgpt58@xiaojiou176.me-team.json": {
+      "proxy_identity": "direct",
+      "proxy_digest": "d15690f08a575024650b01ffac892cfd2b93e6c57c140f1b6d9e47753cabd579",
+      "first_seen_at": "2026-02-14T04:28:34.5333Z",
+      "last_seen_at": "2026-02-14T04:28:34.5333Z",
+      "drift_count": 0,
+      "last_drift_at": "0001-01-01T00:00:00Z",
+      "last_provider": "codex",
+      "last_model": "gpt-5.2-codex"
+    },
+    "codex-9e67bf64-chatgpt60@xiaojiou176.me-team.json": {
+      "proxy_identity": "direct",
+      "proxy_digest": "d15690f08a575024650b01ffac892cfd2b93e6c57c140f1b6d9e47753cabd579",
+      "first_seen_at": "2026-02-14T04:28:35.182146Z",
+      "last_seen_at": "2026-02-14T04:28:35.182146Z",
+      "drift_count": 0,
+      "last_drift_at": "0001-01-01T00:00:00Z",
+      "last_provider": "codex",
+      "last_model": "gpt-5.2-codex"
+    },
+    "gemini-xiaojiou176@gmail.com-gmail-manager-485502.json": {
+      "proxy_identity": "http://127.0.0.1:8890",
+      "proxy_digest": "b7591f205f4c63dc08153c5ecb6f057b3a23268f91693715c952223821f5dfd1",
+      "first_seen_at": "2026-02-14T02:53:28.053217Z",
+      "last_seen_at": "2026-02-14T02:53:28.053217Z",
+      "drift_count": 0,
+      "last_drift_at": "0001-01-01T00:00:00Z",
+      "last_provider": "gemini-cli",
+      "last_model": "gemini-2.5-pro"
+    }
+  }
+}

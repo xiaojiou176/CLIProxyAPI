@@ -9,6 +9,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
+	neturl "net/url"
 	"os"
 	"strings"
 	"syscall"
@@ -533,6 +535,11 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.Pprof.Addr = DefaultPprofAddr
 	cfg.AmpCode.RestrictManagementToLocalhost = false // Default to false: API key auth is sufficient
 	cfg.RemoteManagement.PanelGitHubRepository = DefaultPanelGitHubRepository
+	cfg.ModelVisibility.Enabled = false
+	cfg.ModelProviderRouting.Enabled = false
+	cfg.AccountProxyConstraint.Enabled = false
+	cfg.EgressDeterminism.Enabled = false
+	cfg.EgressDeterminism.DriftAlertThreshold = 1
 	if err = yaml.Unmarshal(data, &cfg); err != nil {
 		if optional {
 			// In cloud deploy mode, if YAML parsing fails, return empty config instead of error.
@@ -588,6 +595,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	if cfg.ErrorLogsMaxFiles < 0 {
 		cfg.ErrorLogsMaxFiles = 10
 	}
+	cfg.ProxyURL = strings.TrimSpace(cfg.ProxyURL)
 
 	// Sanitize Gemini API key configuration and migrate legacy entries.
 	cfg.SanitizeGeminiKeys()
@@ -609,6 +617,20 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 
 	// Normalize global OAuth model name aliases.
 	cfg.SanitizeOAuthModelAlias()
+
+	// Normalize model visibility guard config.
+	cfg.SanitizeModelVisibility()
+
+	// Normalize model-family provider allowlist routing constraints.
+	cfg.SanitizeModelProviderRouting()
+
+	// Normalize egress determinism config.
+	cfg.SanitizeEgressDeterminism()
+
+	// Enforce per-account proxy hard constraints when enabled.
+	if err := cfg.ValidateAccountProxyConstraint(); err != nil {
+		return nil, err
+	}
 
 	// Validate raw payload rules and drop invalid entries.
 	cfg.SanitizePayloadRules()
@@ -739,6 +761,10 @@ func (cfg *Config) SanitizeOpenAICompatibility() {
 		e.Prefix = normalizeModelPrefix(e.Prefix)
 		e.BaseURL = strings.TrimSpace(e.BaseURL)
 		e.Headers = NormalizeHeaders(e.Headers)
+		for j := range e.APIKeyEntries {
+			e.APIKeyEntries[j].APIKey = strings.TrimSpace(e.APIKeyEntries[j].APIKey)
+			e.APIKeyEntries[j].ProxyURL = strings.TrimSpace(e.APIKeyEntries[j].ProxyURL)
+		}
 		if e.BaseURL == "" {
 			// Skip providers with no base-url; treated as removed
 			continue
@@ -759,6 +785,7 @@ func (cfg *Config) SanitizeCodexKeys() {
 		e := cfg.CodexKey[i]
 		e.Prefix = normalizeModelPrefix(e.Prefix)
 		e.BaseURL = strings.TrimSpace(e.BaseURL)
+		e.ProxyURL = strings.TrimSpace(e.ProxyURL)
 		e.Headers = NormalizeHeaders(e.Headers)
 		e.ExcludedModels = NormalizeExcludedModels(e.ExcludedModels)
 		if e.BaseURL == "" {
@@ -777,6 +804,7 @@ func (cfg *Config) SanitizeClaudeKeys() {
 	for i := range cfg.ClaudeKey {
 		entry := &cfg.ClaudeKey[i]
 		entry.Prefix = normalizeModelPrefix(entry.Prefix)
+		entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
 		entry.Headers = NormalizeHeaders(entry.Headers)
 		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
 	}
@@ -820,6 +848,220 @@ func normalizeModelPrefix(prefix string) string {
 		return ""
 	}
 	return trimmed
+}
+
+// SanitizeModelVisibility normalizes and deduplicates model visibility guard entries.
+func (cfg *Config) SanitizeModelVisibility() {
+	if cfg == nil {
+		return
+	}
+	cfg.ModelVisibility.Namespaces = NormalizeModelVisibilityNamespaces(cfg.ModelVisibility.Namespaces)
+	cfg.ModelVisibility.HostNamespaces = NormalizeModelVisibilityHostNamespaces(cfg.ModelVisibility.HostNamespaces)
+}
+
+// SanitizeModelProviderRouting normalizes model-family -> provider allowlist entries.
+func (cfg *Config) SanitizeModelProviderRouting() {
+	if cfg == nil {
+		return
+	}
+	cfg.ModelProviderRouting.FamilyProviderAllowlist = NormalizeModelFamilyProviderAllowlist(cfg.ModelProviderRouting.FamilyProviderAllowlist)
+}
+
+// SanitizeEgressDeterminism normalizes egress determinism settings.
+func (cfg *Config) SanitizeEgressDeterminism() {
+	if cfg == nil {
+		return
+	}
+	cfg.EgressDeterminism.StateFile = strings.TrimSpace(cfg.EgressDeterminism.StateFile)
+	if cfg.EgressDeterminism.DriftAlertThreshold <= 0 {
+		cfg.EgressDeterminism.DriftAlertThreshold = 1
+	}
+}
+
+// NormalizeModelFamilyProviderAllowlist normalizes model-family -> provider allowlist mapping.
+func NormalizeModelFamilyProviderAllowlist(entries map[string][]string) map[string][]string {
+	if len(entries) == 0 {
+		return nil
+	}
+	out := make(map[string][]string, len(entries))
+	for rawFamily, providers := range entries {
+		family := strings.ToLower(strings.TrimSpace(rawFamily))
+		if family == "" {
+			continue
+		}
+		normalizedProviders := normalizeProviderAllowlist(providers)
+		if len(normalizedProviders) == 0 {
+			continue
+		}
+		out[family] = normalizedProviders
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func normalizeProviderAllowlist(providers []string) []string {
+	if len(providers) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(providers))
+	out := make([]string, 0, len(providers))
+	for _, raw := range providers {
+		provider := strings.ToLower(strings.TrimSpace(raw))
+		if provider == "" {
+			continue
+		}
+		if _, exists := seen[provider]; exists {
+			continue
+		}
+		seen[provider] = struct{}{}
+		out = append(out, provider)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// ValidateAccountProxyConstraint enforces per-account proxy-url requirements when enabled.
+func (cfg *Config) ValidateAccountProxyConstraint() error {
+	if cfg == nil || !cfg.AccountProxyConstraint.Enabled {
+		return nil
+	}
+
+	missing := make([]string, 0)
+
+	for i := range cfg.GeminiKey {
+		cfg.GeminiKey[i].ProxyURL = strings.TrimSpace(cfg.GeminiKey[i].ProxyURL)
+		if cfg.GeminiKey[i].ProxyURL == "" {
+			missing = append(missing, fmt.Sprintf("gemini-api-key[%d]", i))
+		}
+	}
+
+	for i := range cfg.CodexKey {
+		cfg.CodexKey[i].ProxyURL = strings.TrimSpace(cfg.CodexKey[i].ProxyURL)
+		if cfg.CodexKey[i].ProxyURL == "" {
+			missing = append(missing, fmt.Sprintf("codex-api-key[%d]", i))
+		}
+	}
+
+	for i := range cfg.ClaudeKey {
+		cfg.ClaudeKey[i].ProxyURL = strings.TrimSpace(cfg.ClaudeKey[i].ProxyURL)
+		if cfg.ClaudeKey[i].ProxyURL == "" {
+			missing = append(missing, fmt.Sprintf("claude-api-key[%d]", i))
+		}
+	}
+
+	for i := range cfg.VertexCompatAPIKey {
+		cfg.VertexCompatAPIKey[i].ProxyURL = strings.TrimSpace(cfg.VertexCompatAPIKey[i].ProxyURL)
+		if cfg.VertexCompatAPIKey[i].ProxyURL == "" {
+			missing = append(missing, fmt.Sprintf("vertex-api-key[%d]", i))
+		}
+	}
+
+	for i := range cfg.OpenAICompatibility {
+		for j := range cfg.OpenAICompatibility[i].APIKeyEntries {
+			cfg.OpenAICompatibility[i].APIKeyEntries[j].ProxyURL = strings.TrimSpace(cfg.OpenAICompatibility[i].APIKeyEntries[j].ProxyURL)
+			if cfg.OpenAICompatibility[i].APIKeyEntries[j].ProxyURL == "" {
+				missing = append(missing, fmt.Sprintf("openai-compatibility[%d].api-key-entries[%d]", i, j))
+			}
+		}
+	}
+
+	if len(missing) == 0 {
+		return nil
+	}
+	return fmt.Errorf("account-proxy-constraint.enabled requires per-account proxy-url, missing: %s", strings.Join(missing, ", "))
+}
+
+// NormalizeModelVisibilityNamespaces normalizes namespace -> visible models mapping.
+func NormalizeModelVisibilityNamespaces(entries map[string][]string) map[string][]string {
+	if len(entries) == 0 {
+		return nil
+	}
+	out := make(map[string][]string, len(entries))
+	for rawNamespace, models := range entries {
+		namespace := strings.TrimSpace(rawNamespace)
+		if namespace == "" {
+			continue
+		}
+		normalized := normalizeVisibleModels(models)
+		if len(normalized) == 0 {
+			continue
+		}
+		out[namespace] = normalized
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func normalizeVisibleModels(models []string) []string {
+	if len(models) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(models))
+	out := make([]string, 0, len(models))
+	for _, raw := range models {
+		model := strings.TrimSpace(raw)
+		if model == "" {
+			continue
+		}
+		key := strings.ToLower(model)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, model)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// NormalizeModelVisibilityHostNamespaces normalizes host->namespace mapping used by model visibility.
+func NormalizeModelVisibilityHostNamespaces(entries map[string]string) map[string]string {
+	if len(entries) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(entries))
+	for rawHost, rawNamespace := range entries {
+		host := normalizeVisibilityHost(rawHost)
+		namespace := strings.TrimSpace(rawNamespace)
+		if host == "" || namespace == "" {
+			continue
+		}
+		out[host] = namespace
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func normalizeVisibilityHost(rawHost string) string {
+	host := strings.TrimSpace(strings.ToLower(rawHost))
+	if host == "" {
+		return ""
+	}
+	if strings.Contains(host, "://") {
+		if parsed, err := neturl.Parse(host); err == nil {
+			host = strings.TrimSpace(strings.ToLower(parsed.Host))
+		}
+	}
+	if idx := strings.Index(host, "/"); idx >= 0 {
+		host = host[:idx]
+	}
+	if parsedHost, port, err := net.SplitHostPort(host); err == nil {
+		if port != "" {
+			host = parsedHost
+		}
+	}
+	host = strings.Trim(host, "[]")
+	return strings.TrimSpace(strings.ToLower(host))
 }
 
 // looksLikeBcrypt returns true if the provided string appears to be a bcrypt hash.

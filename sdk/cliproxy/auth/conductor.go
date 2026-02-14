@@ -142,8 +142,20 @@ type Manager struct {
 	// Optional HTTP RoundTripper provider injected by host.
 	rtProvider RoundTripperProvider
 
+	// Egress determinism state for account->proxy mapping persistence and drift detection.
+	egressMu                  sync.Mutex
+	egressEnabled             bool
+	egressStateFile           string
+	egressDriftAlertThreshold int
+	egressStateLoaded         bool
+	egressMappings            map[string]egressMappingEntry
+
 	// Auto refresh state
 	refreshCancel context.CancelFunc
+
+	// internal drill fault injection state (shadow-only).
+	drillMu             sync.Mutex
+	drillFaultRemaining map[string]int
 }
 
 // NewManager constructs a manager with optional custom selector and hook.
@@ -165,6 +177,9 @@ func NewManager(store Store, selector Selector, hook Hook) *Manager {
 	// atomic.Value requires non-nil initial value.
 	manager.runtimeConfig.Store(&internalconfig.Config{})
 	manager.apiKeyModelAlias.Store(apiKeyModelAliasTable(nil))
+	manager.egressMappings = make(map[string]egressMappingEntry)
+	manager.egressDriftAlertThreshold = defaultEgressDriftAlertThreshold
+	manager.drillFaultRemaining = make(map[string]int)
 	return manager
 }
 
@@ -205,6 +220,7 @@ func (m *Manager) SetConfig(cfg *internalconfig.Config) {
 	}
 	m.runtimeConfig.Store(cfg)
 	m.rebuildAPIKeyModelAliasFromRuntimeConfig()
+	m.applyEgressDeterminismConfig(cfg)
 }
 
 func (m *Manager) lookupAPIKeyUpstreamModel(authID, requestedModel string) string {
@@ -581,6 +597,7 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 
 		entry := logEntryWithRequestID(ctx)
 		debugLogAuthSelection(entry, auth, provider, req.Model)
+		m.observeEgress(auth, provider, routeModel)
 
 		tried[auth.ID] = struct{}{}
 		execCtx := ctx
@@ -592,6 +609,13 @@ func (m *Manager) executeMixedOnce(ctx context.Context, providers []string, req 
 		execReq.Model = rewriteModelForAuth(routeModel, auth)
 		execReq.Model = m.applyOAuthModelAlias(auth, execReq.Model)
 		execReq.Model = m.applyAPIKeyModelAlias(auth, execReq.Model)
+		if action, drillErr := m.consumeInternalDrillFaultForPickedAuth(execCtx, auth, provider, routeModel); action != internalDrillFaultActionNone {
+			if action == internalDrillFaultActionFailFast {
+				return cliproxyexecutor.Response{}, drillErr
+			}
+			lastErr = drillErr
+			continue
+		}
 		resp, errExec := executor.Execute(execCtx, auth, execReq, opts)
 		result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: errExec == nil}
 		if errExec != nil {
@@ -636,6 +660,7 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 
 		entry := logEntryWithRequestID(ctx)
 		debugLogAuthSelection(entry, auth, provider, req.Model)
+		m.observeEgress(auth, provider, routeModel)
 
 		tried[auth.ID] = struct{}{}
 		execCtx := ctx
@@ -647,6 +672,13 @@ func (m *Manager) executeCountMixedOnce(ctx context.Context, providers []string,
 		execReq.Model = rewriteModelForAuth(routeModel, auth)
 		execReq.Model = m.applyOAuthModelAlias(auth, execReq.Model)
 		execReq.Model = m.applyAPIKeyModelAlias(auth, execReq.Model)
+		if action, drillErr := m.consumeInternalDrillFaultForPickedAuth(execCtx, auth, provider, routeModel); action != internalDrillFaultActionNone {
+			if action == internalDrillFaultActionFailFast {
+				return cliproxyexecutor.Response{}, drillErr
+			}
+			lastErr = drillErr
+			continue
+		}
 		resp, errExec := executor.CountTokens(execCtx, auth, execReq, opts)
 		result := Result{AuthID: auth.ID, Provider: provider, Model: routeModel, Success: errExec == nil}
 		if errExec != nil {
@@ -691,6 +723,7 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 
 		entry := logEntryWithRequestID(ctx)
 		debugLogAuthSelection(entry, auth, provider, req.Model)
+		m.observeEgress(auth, provider, routeModel)
 
 		tried[auth.ID] = struct{}{}
 		execCtx := ctx
@@ -702,6 +735,13 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		execReq.Model = rewriteModelForAuth(routeModel, auth)
 		execReq.Model = m.applyOAuthModelAlias(auth, execReq.Model)
 		execReq.Model = m.applyAPIKeyModelAlias(auth, execReq.Model)
+		if action, drillErr := m.consumeInternalDrillFaultForPickedAuth(execCtx, auth, provider, routeModel); action != internalDrillFaultActionNone {
+			if action == internalDrillFaultActionFailFast {
+				return nil, drillErr
+			}
+			lastErr = drillErr
+			continue
+		}
 		chunks, errStream := executor.ExecuteStream(execCtx, auth, execReq, opts)
 		if errStream != nil {
 			if errCtx := execCtx.Err(); errCtx != nil {
@@ -1550,6 +1590,24 @@ func (m *Manager) GetByID(id string) (*Auth, bool) {
 	return auth.Clone(), true
 }
 
+func (m *Manager) accountProxyConstraintEnabled() bool {
+	if m == nil {
+		return false
+	}
+	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+	if cfg == nil {
+		return false
+	}
+	return cfg.AccountProxyConstraint.Enabled
+}
+
+func shouldSkipByAccountProxyConstraint(enabled bool, candidate *Auth) bool {
+	if !enabled || candidate == nil {
+		return false
+	}
+	return strings.TrimSpace(candidate.ProxyURL) == ""
+}
+
 func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, tried map[string]struct{}) (*Auth, ProviderExecutor, error) {
 	m.mu.RLock()
 	executor, okExecutor := m.executors[provider]
@@ -1566,6 +1624,7 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 			modelKey = strings.TrimSpace(parsed.ModelName)
 		}
 	}
+	proxyConstraintEnabled := m.accountProxyConstraintEnabled()
 	registryRef := registry.GetGlobalRegistry()
 	for _, candidate := range m.auths {
 		if candidate.Provider != provider || candidate.Disabled {
@@ -1575,6 +1634,9 @@ func (m *Manager) pickNext(ctx context.Context, provider, model string, opts cli
 			continue
 		}
 		if modelKey != "" && registryRef != nil && !registryRef.ClientSupportsModel(candidate.ID, modelKey) {
+			continue
+		}
+		if shouldSkipByAccountProxyConstraint(proxyConstraintEnabled, candidate) {
 			continue
 		}
 		candidates = append(candidates, candidate)
@@ -1628,6 +1690,7 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 			modelKey = strings.TrimSpace(parsed.ModelName)
 		}
 	}
+	proxyConstraintEnabled := m.accountProxyConstraintEnabled()
 	registryRef := registry.GetGlobalRegistry()
 	for _, candidate := range m.auths {
 		if candidate == nil || candidate.Disabled {
@@ -1647,6 +1710,9 @@ func (m *Manager) pickNextMixed(ctx context.Context, providers []string, model s
 			continue
 		}
 		if modelKey != "" && registryRef != nil && !registryRef.ClientSupportsModel(candidate.ID, modelKey) {
+			continue
+		}
+		if shouldSkipByAccountProxyConstraint(proxyConstraintEnabled, candidate) {
 			continue
 		}
 		candidates = append(candidates, candidate)

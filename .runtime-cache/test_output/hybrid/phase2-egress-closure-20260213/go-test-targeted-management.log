@@ -1,0 +1,5 @@
+[CMD] go test ./internal/api/handlers/management -run TestGetEgressMapping -count=1
+[START] 2026-02-13T23:45:43Z
+ok  	github.com/router-for-me/CLIProxyAPI/v6/internal/api/handlers/management	0.180s
+[END] 2026-02-13T23:45:44Z
+[EXIT] 0

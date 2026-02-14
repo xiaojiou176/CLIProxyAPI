@@ -129,6 +129,13 @@ func isWebUIRequest(c *gin.Context) bool {
 	}
 }
 
+func isAddressAlreadyInUse(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "address already in use")
+}
+
 func startCallbackForwarder(port int, provider, targetBase string) (*callbackForwarder, error) {
 	callbackForwardersMu.Lock()
 	prev := callbackForwarders[port]
@@ -1246,7 +1253,7 @@ func (h *Handler) RequestGeminiCLIToken(c *gin.Context) {
 			"checked":    ts.Checked,
 		}
 
-		fileName := geminiAuth.CredentialFileName(ts.Email, ts.ProjectID, true)
+		fileName := geminiAuth.CredentialFileNameForStorage(&ts, true)
 		record := &coreauth.Auth{
 			ID:       fileName,
 			Provider: "gemini",
@@ -1315,6 +1322,12 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 		var errStart error
 		if forwarder, errStart = startCallbackForwarder(codexCallbackPort, "codex", targetURL); errStart != nil {
 			log.WithError(errStart).Error("failed to start codex callback forwarder")
+			if isAddressAlreadyInUse(errStart) {
+				c.JSON(http.StatusConflict, gin.H{
+					"error": fmt.Sprintf("oauth callback port %d is already in use", codexCallbackPort),
+				})
+				return
+			}
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start callback server"})
 			return
 		}

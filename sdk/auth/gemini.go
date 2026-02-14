@@ -55,7 +55,7 @@ func (a *GeminiAuthenticator) Login(ctx context.Context, cfg *config.Config, opt
 
 	// Skip onboarding here; rely on upstream configuration
 
-	fileName := fmt.Sprintf("%s-%s.json", ts.Email, ts.ProjectID)
+	fileName := gemini.CredentialFileNameForStorage(&ts, false)
 	metadata := map[string]any{
 		"email":      ts.Email,
 		"project_id": ts.ProjectID,

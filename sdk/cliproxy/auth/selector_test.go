@@ -59,6 +59,36 @@ func TestRoundRobinSelectorPick_CyclesDeterministic(t *testing.T) {
 	}
 }
 
+func TestRoundRobinSelectorPick_SameEmailProjectMultipleCredentials(t *testing.T) {
+	t.Parallel()
+
+	selector := &RoundRobinSelector{}
+	auths := []*Auth{
+		{
+			ID:       "a-legacy.json",
+			Metadata: map[string]any{"email": "same@example.com", "project_id": "proj-a"},
+		},
+		{
+			ID:       "b-scoped.json",
+			Metadata: map[string]any{"email": "same@example.com", "project_id": "proj-a"},
+		},
+	}
+
+	want := []string{"a-legacy.json", "b-scoped.json", "a-legacy.json", "b-scoped.json"}
+	for i, id := range want {
+		got, err := selector.Pick(context.Background(), "gemini", "gemini-3.0-pro", cliproxyexecutor.Options{}, auths)
+		if err != nil {
+			t.Fatalf("Pick() #%d error = %v", i, err)
+		}
+		if got == nil {
+			t.Fatalf("Pick() #%d auth = nil", i)
+		}
+		if got.ID != id {
+			t.Fatalf("Pick() #%d auth.ID = %q, want %q", i, got.ID, id)
+		}
+	}
+}
+
 func TestRoundRobinSelectorPick_PriorityBuckets(t *testing.T) {
 	t.Parallel()
 

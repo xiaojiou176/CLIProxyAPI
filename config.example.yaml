@@ -68,6 +68,49 @@ proxy-url: ""
 # When true, unprefixed model requests only use credentials without a prefix (except when prefix == model name).
 force-model-prefix: false
 
+# Namespace-level model visibility guard.
+# enabled: when true, request handlers can enforce namespace-scoped model allowlists.
+# namespaces: map of namespace -> visible model IDs.
+model-visibility:
+  enabled: false
+  # namespaces:
+  #   default:
+  #     - "gpt-5-codex"
+  #     - "gemini-2.5-pro"
+  #   team-a:
+  #     - "claude-sonnet-4-5-20250929"
+  # host-namespaces:
+  #   "codex.local": "default"
+  #   "antigravity.local": "team-a"
+
+# Model-family -> provider pool hard routing constraints.
+# enabled: when true, each model family can only use providers listed in family-provider-allowlist.
+model-provider-routing:
+  enabled: false
+  # family-provider-allowlist:
+  #   codex:
+  #     - "codex"
+  #   claude:
+  #     - "claude"
+  #   gemini:
+  #     - "gemini-cli"
+  #     - "vertex"
+
+# Account-level proxy hard constraint.
+# enabled: when true, every account entry must provide a non-empty proxy-url.
+# A global proxy-url is NOT treated as account-level proxy-url.
+account-proxy-constraint:
+  enabled: false
+
+# Account-level egress determinism.
+# enabled: when true, persist account -> egress proxy mapping and detect proxy drift at runtime.
+# state-file: persistence file path for mapping snapshots (relative to process working directory).
+# drift-alert-threshold: account is marked as alerting when drift-count reaches this value.
+egress-determinism:
+  enabled: false
+  state-file: ".runtime-cache/state/egress-mapping.json"
+  drift-alert-threshold: 1
+
 # Number of times to retry a request. Retries will occur if the HTTP response code is 403, 408, 500, 502, 503, or 504.
 request-retry: 3
 

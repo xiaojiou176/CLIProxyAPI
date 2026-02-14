@@ -1,0 +1,6 @@
+=== RUN   TestRoundRobinSelectorPick_SameEmailProjectMultipleCredentials
+=== PAUSE TestRoundRobinSelectorPick_SameEmailProjectMultipleCredentials
+=== CONT  TestRoundRobinSelectorPick_SameEmailProjectMultipleCredentials
+--- PASS: TestRoundRobinSelectorPick_SameEmailProjectMultipleCredentials (0.00s)
+PASS
+ok  	github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth	0.183s

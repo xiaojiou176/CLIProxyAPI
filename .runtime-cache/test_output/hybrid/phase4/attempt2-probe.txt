@@ -1,0 +1,12 @@
+
+==Probe POST /internal/drill/faults again==
+HTTP/1.1 200 OK
+Access-Control-Allow-Headers: *
+Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS
+Access-Control-Allow-Origin: *
+Content-Type: application/json; charset=utf-8
+Date: Fri, 13 Feb 2026 10:34:41 GMT
+Content-Length: 502
+
+body:
+{"applied":1,"evidence":{"remaining_after_apply":1,"snapshot_after_apply":{"proxy-failure":1}},"guard":{"env_key":"CLIPROXY_ENABLE_SHADOW_DRILL_FAULTS","localhost_ip":"127.0.0.1","port":2456},"guardrails":{"env_key":"CLIPROXY_ENABLE_SHADOW_DRILL_FAULTS","localhost_ip":"127.0.0.1","localhost_only":true,"port":2456,"shadow_only":true,"supported_scenarios":["proxy-failure","account-quota-exhausted"]},"ok":true,"remaining":1,"scenario":"proxy-failure","shadow_only":true,"snapshot":{"proxy-failure":1}}

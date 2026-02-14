@@ -617,6 +617,79 @@ func (h *Handler) DeleteVertexCompatKey(c *gin.Context) {
 	c.JSON(400, gin.H{"error": "missing api-key or index"})
 }
 
+// model-visibility: {enabled, namespaces, host-namespaces}
+func (h *Handler) GetModelVisibility(c *gin.Context) {
+	if h == nil || h.cfg == nil {
+		c.JSON(200, gin.H{"model-visibility": config.ModelVisibilityConfig{}})
+		return
+	}
+	current := h.cfg.ModelVisibility
+	current.Namespaces = config.NormalizeModelVisibilityNamespaces(current.Namespaces)
+	current.HostNamespaces = config.NormalizeModelVisibilityHostNamespaces(current.HostNamespaces)
+	c.JSON(200, gin.H{"model-visibility": current})
+}
+
+func (h *Handler) PutModelVisibility(c *gin.Context) {
+	data, err := c.GetRawData()
+	if err != nil {
+		c.JSON(400, gin.H{"error": "failed to read body"})
+		return
+	}
+
+	var entry config.ModelVisibilityConfig
+	if err = json.Unmarshal(data, &entry); err != nil {
+		var wrapper struct {
+			ModelVisibility config.ModelVisibilityConfig `json:"model-visibility"`
+		}
+		if errWrap := json.Unmarshal(data, &wrapper); errWrap != nil {
+			c.JSON(400, gin.H{"error": "invalid body"})
+			return
+		}
+		entry = wrapper.ModelVisibility
+	}
+
+	h.cfg.ModelVisibility = entry
+	h.cfg.SanitizeModelVisibility()
+	h.persist(c)
+}
+
+func (h *Handler) PatchModelVisibility(c *gin.Context) {
+	var body struct {
+		Enabled        *bool                `json:"enabled"`
+		Namespaces     *map[string][]string `json:"namespaces"`
+		HostNamespaces *map[string]string   `json:"host-namespaces"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(400, gin.H{"error": "invalid body"})
+		return
+	}
+	if body.Enabled == nil && body.Namespaces == nil && body.HostNamespaces == nil {
+		c.JSON(400, gin.H{"error": "missing fields"})
+		return
+	}
+
+	if body.Enabled != nil {
+		h.cfg.ModelVisibility.Enabled = *body.Enabled
+	}
+	if body.Namespaces != nil {
+		next := make(map[string][]string, len(*body.Namespaces))
+		for namespace, models := range *body.Namespaces {
+			next[namespace] = append([]string(nil), models...)
+		}
+		h.cfg.ModelVisibility.Namespaces = next
+	}
+	if body.HostNamespaces != nil {
+		next := make(map[string]string, len(*body.HostNamespaces))
+		for host, namespace := range *body.HostNamespaces {
+			next[host] = namespace
+		}
+		h.cfg.ModelVisibility.HostNamespaces = next
+	}
+
+	h.cfg.SanitizeModelVisibility()
+	h.persist(c)
+}
+
 // oauth-excluded-models: map[string][]string
 func (h *Handler) GetOAuthExcludedModels(c *gin.Context) {
 	c.JSON(200, gin.H{"oauth-excluded-models": config.NormalizeOAuthExcludedModels(h.cfg.OAuthExcludedModels)})

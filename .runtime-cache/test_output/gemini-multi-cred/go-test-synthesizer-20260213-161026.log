@@ -1,0 +1,4 @@
+=== RUN   TestFileSynthesizer_Synthesize_GeminiLegacyAndNewNamesCoexist
+--- PASS: TestFileSynthesizer_Synthesize_GeminiLegacyAndNewNamesCoexist (0.00s)
+PASS
+ok  	github.com/router-for-me/CLIProxyAPI/v6/internal/watcher/synthesizer	0.169s

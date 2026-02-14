@@ -348,6 +348,7 @@ func (s *Server) setupRoutes() {
 		})
 	})
 	s.engine.POST("/v1internal:method", geminiCLIHandlers.CLIHandler)
+	s.engine.POST("/internal/drill/faults", s.mgmt.PostInternalDrillFault)
 
 	// OAuth callback endpoints (reuse main server port)
 	// These endpoints receive provider redirects and persist
@@ -478,6 +479,7 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/usage", s.mgmt.GetUsageStatistics)
 		mgmt.GET("/usage/export", s.mgmt.ExportUsageStatistics)
 		mgmt.POST("/usage/import", s.mgmt.ImportUsageStatistics)
+		mgmt.GET("/egress-mapping", s.mgmt.GetEgressMapping)
 		mgmt.GET("/config", s.mgmt.GetConfig)
 		mgmt.GET("/config.yaml", s.mgmt.GetConfigYAML)
 		mgmt.PUT("/config.yaml", s.mgmt.PutConfigYAML)
@@ -574,6 +576,10 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/force-model-prefix", s.mgmt.GetForceModelPrefix)
 		mgmt.PUT("/force-model-prefix", s.mgmt.PutForceModelPrefix)
 		mgmt.PATCH("/force-model-prefix", s.mgmt.PutForceModelPrefix)
+
+		mgmt.GET("/model-visibility", s.mgmt.GetModelVisibility)
+		mgmt.PUT("/model-visibility", s.mgmt.PutModelVisibility)
+		mgmt.PATCH("/model-visibility", s.mgmt.PatchModelVisibility)
 
 		mgmt.GET("/routing/strategy", s.mgmt.GetRoutingStrategy)
 		mgmt.PUT("/routing/strategy", s.mgmt.PutRoutingStrategy)
@@ -760,7 +766,28 @@ func (s *Server) unifiedModelsHandler(openaiHandler *openai.OpenAIAPIHandler, cl
 		// Route to Claude handler if User-Agent starts with "claude-cli"
 		if strings.HasPrefix(userAgent, "claude-cli") {
 			// log.Debugf("Routing /v1/models to Claude handler for User-Agent: %s", userAgent)
-			claudeHandler.ClaudeModels(c)
+			models := claudeHandler.Models()
+			if s.handlers != nil {
+				models = s.handlers.FilterVisibleModels(c, models)
+			}
+
+			firstID := ""
+			lastID := ""
+			if len(models) > 0 {
+				if id, ok := models[0]["id"].(string); ok {
+					firstID = id
+				}
+				if id, ok := models[len(models)-1]["id"].(string); ok {
+					lastID = id
+				}
+			}
+
+			c.JSON(http.StatusOK, gin.H{
+				"data":     models,
+				"has_more": false,
+				"first_id": firstID,
+				"last_id":  lastID,
+			})
 		} else {
 			// log.Debugf("Routing /v1/models to OpenAI handler for User-Agent: %s", userAgent)
 			openaiHandler.OpenAIModels(c)

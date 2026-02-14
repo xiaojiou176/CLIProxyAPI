@@ -1,0 +1,6 @@
+=== RUN   TestFileSynthesizer_Synthesize_GeminiLegacyAndNewNamesCoexist
+    file_test.go:208: ids = [gemini-same@example.com-proj-a-cred-b.json same@example.com-proj-a.json], want [same@example.com-proj-a.json gemini-same@example.com-proj-a-cred-b.json]
+--- FAIL: TestFileSynthesizer_Synthesize_GeminiLegacyAndNewNamesCoexist (0.00s)
+FAIL
+FAIL	github.com/router-for-me/CLIProxyAPI/v6/internal/watcher/synthesizer	0.166s
+FAIL

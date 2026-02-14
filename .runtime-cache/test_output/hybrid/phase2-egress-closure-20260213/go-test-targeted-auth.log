@@ -1,0 +1,5 @@
+[CMD] go test ./sdk/cliproxy/auth -run TestManagerExecuteCount_AccountProxyConstraintWithEgressDeterminism|TestManagerObserveEgress|TestManagerEgressMappingSnapshot|TestManagerPickNext_AccountProxyConstraint -count=1
+[START] 2026-02-13T23:45:41Z
+ok  	github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth	0.168s
+[END] 2026-02-13T23:45:43Z
+[EXIT] 0

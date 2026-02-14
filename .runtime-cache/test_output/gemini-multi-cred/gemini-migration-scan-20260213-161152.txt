@@ -1,0 +1,3 @@
+internal/config/config.go:556:	// 	if cfg.migrateLegacyGeminiKeys(legacy.LegacyGeminiKeys) {
+internal/config/config.go:600:	// Sanitize Gemini API key configuration and migrate legacy entries.
+internal/config/config.go:1884:func (cfg *Config) migrateLegacyGeminiKeys(legacy []string) bool {
