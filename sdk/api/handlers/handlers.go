@@ -153,7 +153,7 @@ func StreamingBootstrapRetries(cfg *config.SDKConfig) int {
 	return retries
 }
 
-func requestExecutionMetadata(ctx context.Context) map[string]any {
+func requestExecutionMetadata(ctx context.Context, rawJSON []byte) map[string]any {
 	// Idempotency-Key is an optional client-supplied header used to correlate retries.
 	// It is forwarded as execution metadata; when absent we generate a UUID.
 	key := ""
@@ -165,7 +165,62 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 	if key == "" {
 		key = uuid.NewString()
 	}
-	return map[string]any{idempotencyKeyMetadataKey: key}
+	meta := map[string]any{idempotencyKeyMetadataKey: key}
+	if sessionKey := deriveSessionAffinityKey(ctx, rawJSON); sessionKey != "" {
+		meta[coreexecutor.SessionAffinityKeyMetadataKey] = sessionKey
+	}
+	return meta
+}
+
+func deriveSessionAffinityKey(ctx context.Context, rawJSON []byte) string {
+	headerCandidates := []string{
+		"session_id",
+		"Session_id",
+		"x-session-id",
+		"x-codex-session-id",
+		"x-jarvis-run-id",
+		"x-jarvis-task-id",
+		"conversation_id",
+		"Conversation_id",
+	}
+	if ctx != nil {
+		if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
+			for _, header := range headerCandidates {
+				if val := strings.TrimSpace(ginCtx.GetHeader(header)); val != "" {
+					return val
+				}
+			}
+		}
+	}
+
+	if len(rawJSON) == 0 {
+		return ""
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(rawJSON, &payload); err != nil {
+		return ""
+	}
+	payloadCandidates := []string{
+		"session_id",
+		"sessionId",
+		"conversation_id",
+		"conversationId",
+		"prompt_cache_key",
+		"previous_response_id",
+		"response_id",
+		"thread_id",
+		"run_id",
+	}
+	for _, key := range payloadCandidates {
+		if raw, ok := payload[key]; ok {
+			if str, ok := raw.(string); ok {
+				if trimmed := strings.TrimSpace(str); trimmed != "" {
+					return trimmed
+				}
+			}
+		}
+	}
+	return ""
 }
 
 // BaseAPIHandler contains the handlers for API endpoints.
@@ -391,7 +446,7 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 	if errMsg != nil {
 		return nil, errMsg
 	}
-	reqMeta := requestExecutionMetadata(ctx)
+	reqMeta := requestExecutionMetadata(ctx, rawJSON)
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
 	payload := rawJSON
 	if len(payload) == 0 {
@@ -437,7 +492,7 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 	if errMsg != nil {
 		return nil, errMsg
 	}
-	reqMeta := requestExecutionMetadata(ctx)
+	reqMeta := requestExecutionMetadata(ctx, rawJSON)
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
 	payload := rawJSON
 	if len(payload) == 0 {
@@ -489,7 +544,7 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 		close(errChan)
 		return nil, errChan
 	}
-	reqMeta := requestExecutionMetadata(ctx)
+	reqMeta := requestExecutionMetadata(ctx, rawJSON)
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
 	payload := rawJSON
 	if len(payload) == 0 {

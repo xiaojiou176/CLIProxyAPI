@@ -52,6 +52,7 @@ const (
 	refreshFailureBackoff = 5 * time.Minute
 	quotaBackoffBase      = time.Second
 	quotaBackoffMax       = 30 * time.Minute
+	failureCooldownMin    = 30 * time.Minute
 )
 
 var quotaCooldownDisabled atomic.Bool
@@ -474,6 +475,7 @@ func (m *Manager) Load(ctx context.Context) error {
 		if auth == nil || auth.ID == "" {
 			continue
 		}
+		hydrateRuntimeStateFromMetadata(auth)
 		auth.EnsureIndex()
 		m.auths[auth.ID] = auth.Clone()
 	}
@@ -772,7 +774,14 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 					if se, ok := errors.AsType[cliproxyexecutor.StatusError](chunk.Err); ok && se != nil {
 						rerr.HTTPStatus = se.StatusCode()
 					}
-					m.MarkResult(streamCtx, Result{AuthID: streamAuth.ID, Provider: streamProvider, Model: routeModel, Success: false, Error: rerr})
+					m.MarkResult(streamCtx, Result{
+						AuthID:     streamAuth.ID,
+						Provider:   streamProvider,
+						Model:      routeModel,
+						Success:    false,
+						Error:      rerr,
+						RetryAfter: retryAfterFromError(chunk.Err),
+					})
 				}
 				if !forward {
 					continue
@@ -866,6 +875,15 @@ func (m *Manager) applyAPIKeyModelAlias(auth *Auth, requestedModel string) strin
 
 	// Fast path: lookup per-auth mapping table (keyed by auth.ID).
 	if resolved := m.lookupAPIKeyUpstreamModel(auth.ID, requestedModel); resolved != "" {
+		if blocksMiniDowngrade(requestedModel, resolved) {
+			log.WithFields(log.Fields{
+				"auth_id":         auth.ID,
+				"provider":        auth.Provider,
+				"requested_model": requestedModel,
+				"resolved_model":  resolved,
+			}).Warn("blocked api-key model alias downgrade to mini")
+			return requestedModel
+		}
 		return resolved
 	}
 
@@ -893,6 +911,15 @@ func (m *Manager) applyAPIKeyModelAlias(auth *Auth, requestedModel string) strin
 
 	// Return upstream model if found, otherwise return requested model.
 	if upstreamModel != "" {
+		if blocksMiniDowngrade(requestedModel, upstreamModel) {
+			log.WithFields(log.Fields{
+				"auth_id":         auth.ID,
+				"provider":        auth.Provider,
+				"requested_model": requestedModel,
+				"resolved_model":  upstreamModel,
+			}).Warn("blocked api-key model alias downgrade to mini")
+			return requestedModel
+		}
 		return upstreamModel
 	}
 	return requestedModel
@@ -1190,6 +1217,9 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 	suspendReason := ""
 	clearModelQuota := false
 	setModelQuota := false
+	logErrorKind := ""
+	logDisabled := false
+	var logFrozenUntil time.Time
 
 	m.mu.Lock()
 	if auth, ok := m.auths[result.AuthID]; ok && auth != nil {
@@ -1217,70 +1247,109 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 				state.Unavailable = true
 				state.Status = StatusError
 				state.UpdatedAt = now
+				kind := ErrorKindUnknown
+				reason := ""
+				resolvedRetryAfter := result.RetryAfter
+				disableByPolicy := false
 				if result.Error != nil {
+					kind, reason, resolvedRetryAfter, disableByPolicy = classifyResultError(result.Error, result.RetryAfter)
+					result.Error.Code = string(kind)
 					state.LastError = cloneError(result.Error)
-					state.StatusMessage = result.Error.Message
+					state.StatusMessage = reason
 					auth.LastError = cloneError(result.Error)
-					auth.StatusMessage = result.Error.Message
+					auth.StatusMessage = reason
 				}
-
-				statusCode := statusCodeFromResult(result.Error)
-				switch statusCode {
-				case 401:
-					next := now.Add(30 * time.Minute)
-					state.NextRetryAfter = next
-					suspendReason = "unauthorized"
-					shouldSuspendModel = true
-				case 402, 403:
-					next := now.Add(30 * time.Minute)
-					state.NextRetryAfter = next
-					suspendReason = "payment_required"
-					shouldSuspendModel = true
-				case 404:
-					next := now.Add(12 * time.Hour)
-					state.NextRetryAfter = next
-					suspendReason = "not_found"
-					shouldSuspendModel = true
-				case 429:
-					var next time.Time
-					backoffLevel := state.Quota.BackoffLevel
-					if result.RetryAfter != nil {
-						next = now.Add(*result.RetryAfter)
-					} else {
-						cooldown, nextLevel := nextQuotaCooldown(backoffLevel, quotaCooldownDisabledForAuth(auth))
-						if cooldown > 0 {
-							next = now.Add(cooldown)
-						}
-						backoffLevel = nextLevel
-					}
-					state.NextRetryAfter = next
-					state.Quota = QuotaState{
-						Exceeded:      true,
-						Reason:        "quota",
-						NextRecoverAt: next,
-						BackoffLevel:  backoffLevel,
-					}
-					suspendReason = "quota"
-					shouldSuspendModel = true
-					setModelQuota = true
-				case 408, 500, 502, 503, 504:
-					if quotaCooldownDisabledForAuth(auth) {
-						state.NextRetryAfter = time.Time{}
-					} else {
-						next := now.Add(1 * time.Minute)
+				if reason == "" && result.Error != nil {
+					reason = result.Error.Message
+				}
+				if reason != "" {
+					state.StatusMessage = reason
+					auth.StatusMessage = reason
+				}
+				if disableByPolicy && m.fatalDisablePolicyEnabled() {
+					disableAuthByPolicy(auth, kind, now)
+					shouldSuspendModel = false
+				} else {
+					switch kind {
+					case ErrorKindUnauthorized:
+						next := now.Add(30 * time.Minute)
 						state.NextRetryAfter = next
+						suspendReason = string(kind)
+						shouldSuspendModel = true
+					case ErrorKindForbidden:
+						next := now.Add(30 * time.Minute)
+						state.NextRetryAfter = next
+						suspendReason = string(kind)
+						shouldSuspendModel = true
+					case ErrorKindQuotaLimited5h, ErrorKindQuotaLimited7d, ErrorKindQuotaLimited:
+						var next time.Time
+						backoffLevel := state.Quota.BackoffLevel
+						if resolvedRetryAfter != nil {
+							next = now.Add(*resolvedRetryAfter)
+						} else {
+							cooldown, nextLevel := nextQuotaCooldown(backoffLevel, quotaCooldownDisabledForAuth(auth))
+							if cooldown > 0 {
+								next = now.Add(cooldown)
+							}
+							backoffLevel = nextLevel
+						}
+						state.NextRetryAfter = next
+						state.Quota = QuotaState{
+							Exceeded:      true,
+							Reason:        "quota",
+							NextRecoverAt: next,
+							BackoffLevel:  backoffLevel,
+						}
+						suspendReason = string(kind)
+						shouldSuspendModel = true
+						setModelQuota = true
+					case ErrorKindTransientUpstream, ErrorKindNetworkError:
+						if quotaCooldownDisabledForAuth(auth) {
+							state.NextRetryAfter = time.Time{}
+						} else if resolvedRetryAfter != nil && *resolvedRetryAfter > 0 {
+							state.NextRetryAfter = now.Add(*resolvedRetryAfter)
+						} else {
+							state.NextRetryAfter = now.Add(1 * time.Minute)
+						}
+					default:
+						state.NextRetryAfter = time.Time{}
 					}
-				default:
-					state.NextRetryAfter = time.Time{}
+					state.NextRetryAfter = ensureMinimumFailureCooldown(now, state.NextRetryAfter)
+					if state.Quota.Exceeded {
+						if state.Quota.NextRecoverAt.IsZero() || state.Quota.NextRecoverAt.Before(state.NextRetryAfter) {
+							state.Quota.NextRecoverAt = state.NextRetryAfter
+						}
+					}
 				}
 
-				auth.Status = StatusError
+				if auth.Status != StatusDisabled {
+					auth.Status = StatusError
+				}
 				auth.UpdatedAt = now
 				updateAggregatedAvailability(auth, now)
 			} else {
-				applyAuthFailureState(auth, result.Error, result.RetryAfter, now)
+				applyAuthFailureState(auth, result.Error, result.RetryAfter, now, m.fatalDisablePolicyEnabled())
 			}
 		}
+
+		if result.Model != "" {
+			if state := auth.ModelStates[result.Model]; state != nil {
+				if state.LastError != nil {
+					logErrorKind = strings.TrimSpace(state.LastError.Code)
+				}
+				logFrozenUntil = state.NextRetryAfter
+				if !state.Quota.NextRecoverAt.IsZero() && (logFrozenUntil.IsZero() || state.Quota.NextRecoverAt.After(logFrozenUntil)) {
+					logFrozenUntil = state.Quota.NextRecoverAt
+				}
+			}
+		} else if auth.LastError != nil {
+			logErrorKind = strings.TrimSpace(auth.LastError.Code)
+			logFrozenUntil = auth.NextRetryAfter
+			if !auth.Quota.NextRecoverAt.IsZero() && (logFrozenUntil.IsZero() || auth.Quota.NextRecoverAt.After(logFrozenUntil)) {
+				logFrozenUntil = auth.Quota.NextRecoverAt
+			}
+		}
+		logDisabled = auth.Disabled
 
 		_ = m.persist(ctx, auth)
 	}
@@ -1296,6 +1365,19 @@ func (m *Manager) MarkResult(ctx context.Context, result Result) {
 		registry.GetGlobalRegistry().ResumeClientModel(result.AuthID, result.Model)
 	} else if shouldSuspendModel {
 		registry.GetGlobalRegistry().SuspendClientModel(result.AuthID, result.Model, suspendReason)
+	}
+	if !result.Success {
+		fields := log.Fields{
+			"auth_id":    result.AuthID,
+			"provider":   result.Provider,
+			"model":      result.Model,
+			"error_kind": logErrorKind,
+			"disabled":   logDisabled,
+		}
+		if !logFrozenUntil.IsZero() {
+			fields["frozen_until"] = logFrozenUntil.UTC().Format(time.RFC3339)
+		}
+		log.WithFields(fields).Warn("auth failure policy applied")
 	}
 
 	m.hook.OnResult(ctx, result)
@@ -1492,37 +1574,41 @@ func isRequestInvalidError(err error) bool {
 	return strings.Contains(err.Error(), "invalid_request_error")
 }
 
-func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Duration, now time.Time) {
+func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Duration, now time.Time, enableFatalDisable bool) {
 	if auth == nil {
 		return
 	}
 	auth.Unavailable = true
 	auth.Status = StatusError
 	auth.UpdatedAt = now
+	kind := ErrorKindUnknown
+	reason := ""
+	resolvedRetryAfter := retryAfter
+	disableByPolicy := false
 	if resultErr != nil {
+		kind, reason, resolvedRetryAfter, disableByPolicy = classifyResultError(resultErr, retryAfter)
+		resultErr.Code = string(kind)
 		auth.LastError = cloneError(resultErr)
-		if resultErr.Message != "" {
-			auth.StatusMessage = resultErr.Message
-		}
+		auth.StatusMessage = reason
 	}
-	statusCode := statusCodeFromResult(resultErr)
-	switch statusCode {
-	case 401:
+	if disableByPolicy && enableFatalDisable {
+		disableAuthByPolicy(auth, kind, now)
+		return
+	}
+	switch kind {
+	case ErrorKindUnauthorized:
 		auth.StatusMessage = "unauthorized"
 		auth.NextRetryAfter = now.Add(30 * time.Minute)
-	case 402, 403:
-		auth.StatusMessage = "payment_required"
+	case ErrorKindForbidden:
+		auth.StatusMessage = "forbidden"
 		auth.NextRetryAfter = now.Add(30 * time.Minute)
-	case 404:
-		auth.StatusMessage = "not_found"
-		auth.NextRetryAfter = now.Add(12 * time.Hour)
-	case 429:
+	case ErrorKindQuotaLimited5h, ErrorKindQuotaLimited7d, ErrorKindQuotaLimited:
 		auth.StatusMessage = "quota exhausted"
 		auth.Quota.Exceeded = true
 		auth.Quota.Reason = "quota"
 		var next time.Time
-		if retryAfter != nil {
-			next = now.Add(*retryAfter)
+		if resolvedRetryAfter != nil {
+			next = now.Add(*resolvedRetryAfter)
 		} else {
 			cooldown, nextLevel := nextQuotaCooldown(auth.Quota.BackoffLevel, quotaCooldownDisabledForAuth(auth))
 			if cooldown > 0 {
@@ -1532,10 +1618,12 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		}
 		auth.Quota.NextRecoverAt = next
 		auth.NextRetryAfter = next
-	case 408, 500, 502, 503, 504:
-		auth.StatusMessage = "transient upstream error"
+	case ErrorKindTransientUpstream, ErrorKindNetworkError:
+		auth.StatusMessage = string(kind)
 		if quotaCooldownDisabledForAuth(auth) {
 			auth.NextRetryAfter = time.Time{}
+		} else if resolvedRetryAfter != nil && *resolvedRetryAfter > 0 {
+			auth.NextRetryAfter = now.Add(*resolvedRetryAfter)
 		} else {
 			auth.NextRetryAfter = now.Add(1 * time.Minute)
 		}
@@ -1543,6 +1631,55 @@ func applyAuthFailureState(auth *Auth, resultErr *Error, retryAfter *time.Durati
 		if auth.StatusMessage == "" {
 			auth.StatusMessage = "request failed"
 		}
+	}
+	auth.NextRetryAfter = ensureMinimumFailureCooldown(now, auth.NextRetryAfter)
+	if auth.Quota.Exceeded {
+		if auth.Quota.NextRecoverAt.IsZero() || auth.Quota.NextRecoverAt.Before(auth.NextRetryAfter) {
+			auth.Quota.NextRecoverAt = auth.NextRetryAfter
+		}
+	}
+}
+
+func ensureMinimumFailureCooldown(now time.Time, next time.Time) time.Time {
+	minNext := now.Add(failureCooldownMin)
+	if next.IsZero() || next.Before(minNext) {
+		return minNext
+	}
+	return next
+}
+
+func (m *Manager) fatalDisablePolicyEnabled() bool {
+	if m == nil {
+		return true
+	}
+	cfg, _ := m.runtimeConfig.Load().(*internalconfig.Config)
+	if cfg == nil {
+		return true
+	}
+	return cfg.QuotaExceeded.DisableFatalAccounts
+}
+
+func disableAuthByPolicy(auth *Auth, kind ErrorKind, now time.Time) {
+	if auth == nil {
+		return
+	}
+	auth.Disabled = true
+	auth.Unavailable = true
+	auth.Status = StatusDisabled
+	auth.StatusMessage = "disabled_by_policy:" + string(kind)
+	auth.NextRetryAfter = time.Time{}
+	auth.Quota = QuotaState{}
+	auth.UpdatedAt = now
+	for _, state := range auth.ModelStates {
+		if state == nil {
+			continue
+		}
+		state.Status = StatusDisabled
+		state.Unavailable = true
+		state.StatusMessage = "disabled_by_policy:" + string(kind)
+		state.NextRetryAfter = time.Time{}
+		state.Quota = QuotaState{}
+		state.UpdatedAt = now
 	}
 }
 
@@ -1765,6 +1902,7 @@ func (m *Manager) persist(ctx context.Context, auth *Auth) error {
 	if auth.Metadata == nil {
 		return nil
 	}
+	syncRuntimeStateToMetadata(auth)
 	_, err := m.store.Save(ctx, auth)
 	return err
 }
@@ -2102,7 +2240,9 @@ func (m *Manager) refreshAuth(ctx context.Context, id string) {
 	}
 	updated.LastRefreshedAt = now
 	updated.NextRefreshAfter = time.Time{}
-	updated.LastError = nil
+	if current, ok := m.GetByID(id); ok && current != nil {
+		MergeRuntimeFailureState(updated, current, now)
+	}
 	updated.UpdatedAt = now
 	_, _ = m.Update(ctx, updated)
 }

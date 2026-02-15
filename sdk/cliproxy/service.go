@@ -290,6 +290,7 @@ func (s *Service) applyCoreAuthAddOrUpdate(ctx context.Context, auth *coreauth.A
 		auth.CreatedAt = existing.CreatedAt
 		auth.LastRefreshedAt = existing.LastRefreshedAt
 		auth.NextRefreshAfter = existing.NextRefreshAfter
+		coreauth.MergeRuntimeFailureState(auth, existing, time.Now())
 		op = "update"
 		_, err = s.coreManager.Update(ctx, auth)
 	} else {

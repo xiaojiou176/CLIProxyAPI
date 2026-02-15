@@ -867,12 +867,10 @@ func parseRetryDelay(errorBody []byte) (*time.Duration, error) {
 			if typeVal == "type.googleapis.com/google.rpc.RetryInfo" {
 				retryDelay := detail.Get("retryDelay").String()
 				if retryDelay != "" {
-					// Parse duration string like "0.847655010s"
-					duration, err := time.ParseDuration(retryDelay)
-					if err != nil {
-						return nil, fmt.Errorf("failed to parse duration")
+					if duration, ok := parseFlexibleRetryDuration(retryDelay); ok {
+						return &duration, nil
 					}
-					return &duration, nil
+					return nil, fmt.Errorf("failed to parse duration")
 				}
 			}
 		}
@@ -883,8 +881,7 @@ func parseRetryDelay(errorBody []byte) (*time.Duration, error) {
 			if typeVal == "type.googleapis.com/google.rpc.ErrorInfo" {
 				quotaResetDelay := detail.Get("metadata.quotaResetDelay").String()
 				if quotaResetDelay != "" {
-					duration, err := time.ParseDuration(quotaResetDelay)
-					if err == nil {
+					if duration, ok := parseFlexibleRetryDuration(quotaResetDelay); ok {
 						return &duration, nil
 					}
 				}
@@ -892,17 +889,55 @@ func parseRetryDelay(errorBody []byte) (*time.Duration, error) {
 		}
 	}
 
-	// Fallback: parse from error.message "Your quota will reset after Xs."
+	// Fallback: parse from error.message, e.g.
+	// "Your quota will reset after 3600s." / "retry after 5h" / "try again in 7d"
 	message := gjson.GetBytes(errorBody, "error.message").String()
 	if message != "" {
-		re := regexp.MustCompile(`after\s+(\d+)s\.?`)
+		re := regexp.MustCompile(`(?:after|in)\s+(\d+)\s*([smhd])\.?`)
 		if matches := re.FindStringSubmatch(message); len(matches) > 1 {
-			seconds, err := strconv.Atoi(matches[1])
-			if err == nil {
-				return new(time.Duration(seconds) * time.Second), nil
+			value, err := strconv.Atoi(matches[1])
+			if err == nil && value > 0 {
+				unit := "s"
+				if len(matches) > 2 {
+					unit = strings.ToLower(matches[2])
+				}
+				if duration, ok := parseFlexibleRetryDuration(fmt.Sprintf("%d%s", value, unit)); ok {
+					return &duration, nil
+				}
 			}
 		}
 	}
 
 	return nil, fmt.Errorf("no RetryInfo found")
+}
+
+func parseFlexibleRetryDuration(raw string) (time.Duration, bool) {
+	trimmed := strings.TrimSpace(strings.ToLower(raw))
+	if trimmed == "" {
+		return 0, false
+	}
+	if duration, err := time.ParseDuration(trimmed); err == nil && duration > 0 {
+		return duration, true
+	}
+	re := regexp.MustCompile(`^(\d+)\s*([smhd])$`)
+	matches := re.FindStringSubmatch(trimmed)
+	if len(matches) != 3 {
+		return 0, false
+	}
+	value, err := strconv.Atoi(matches[1])
+	if err != nil || value <= 0 {
+		return 0, false
+	}
+	switch matches[2] {
+	case "d":
+		return time.Duration(value) * 24 * time.Hour, true
+	case "h":
+		return time.Duration(value) * time.Hour, true
+	case "m":
+		return time.Duration(value) * time.Minute, true
+	case "s":
+		return time.Duration(value) * time.Second, true
+	default:
+		return 0, false
+	}
 }

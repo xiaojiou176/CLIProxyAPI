@@ -10,6 +10,10 @@ import (
 // RequestedModelMetadataKey stores the client-requested model name in Options.Metadata.
 const RequestedModelMetadataKey = "requested_model"
 
+// SessionAffinityKeyMetadataKey stores a stable session key used by selectors
+// to keep the same session on the same auth when possible.
+const SessionAffinityKeyMetadataKey = "session_affinity_key"
+
 // Request encapsulates the translated payload that will be sent to a provider executor.
 type Request struct {
 	// Model is the upstream model identifier after translation.

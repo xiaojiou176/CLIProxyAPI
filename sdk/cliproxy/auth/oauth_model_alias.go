@@ -5,6 +5,7 @@ import (
 
 	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
+	log "github.com/sirupsen/logrus"
 )
 
 type modelAliasEntry interface {
@@ -77,7 +78,35 @@ func (m *Manager) applyOAuthModelAlias(auth *Auth, requestedModel string) string
 	if upstreamModel == "" {
 		return requestedModel
 	}
+	if blocksMiniDowngrade(requestedModel, upstreamModel) {
+		log.WithFields(log.Fields{
+			"auth_id":         auth.ID,
+			"provider":        auth.Provider,
+			"requested_model": requestedModel,
+			"resolved_model":  upstreamModel,
+		}).Warn("blocked model alias downgrade to mini")
+		return requestedModel
+	}
 	return upstreamModel
+}
+
+func blocksMiniDowngrade(requestedModel, resolvedModel string) bool {
+	requestedBase := strings.ToLower(strings.TrimSpace(thinking.ParseSuffix(requestedModel).ModelName))
+	resolvedBase := strings.ToLower(strings.TrimSpace(thinking.ParseSuffix(resolvedModel).ModelName))
+	if requestedBase == "" || resolvedBase == "" {
+		return false
+	}
+
+	// Only guard codex/openai gpt families; do not affect other providers.
+	if !strings.HasPrefix(requestedBase, "gpt-") && !strings.Contains(requestedBase, "codex") {
+		return false
+	}
+	// Request itself is already mini-capable, not a downgrade.
+	if strings.Contains(requestedBase, "mini") {
+		return false
+	}
+
+	return strings.Contains(resolvedBase, "mini")
 }
 
 func resolveModelAliasFromConfigModels(requestedModel string, models []modelAliasEntry) string {

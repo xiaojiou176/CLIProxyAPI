@@ -19,6 +19,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	responsesconverter "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/openai/openai/responses"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
+	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -118,6 +119,13 @@ func (h *OpenAIAPIHandler) ChatCompletions(c *gin.Context) {
 		modelName := gjson.GetBytes(rawJSON, "model").String()
 		rawJSON = responsesconverter.ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName, rawJSON, stream)
 		stream = gjson.GetBytes(rawJSON, "stream").Bool()
+	}
+
+	// [PATCH] Inject default max_tokens if missing to prevent upstream truncation
+	// caused by Codex CLI omitting this parameter.
+	if !gjson.GetBytes(rawJSON, "max_tokens").Exists() && !gjson.GetBytes(rawJSON, "max_completion_tokens").Exists() {
+		// Default to 8192 tokens (safe for most modern models)
+		rawJSON, _ = sjson.SetBytes(rawJSON, "max_tokens", 8192)
 	}
 
 	if stream {
@@ -340,6 +348,14 @@ func convertChatCompletionsStreamChunkToCompletions(chunkData []byte) []byte {
 					hasContent = true
 					return false // Break out of forEach
 				}
+				if toolCalls := delta.Get("tool_calls"); toolCalls.Exists() {
+					hasContent = true
+					return false
+				}
+				if functionCall := delta.Get("function_call"); functionCall.Exists() {
+					hasContent = true
+					return false
+				}
 			}
 			// Also check for finish_reason to ensure we don't skip final chunks
 			if finishReason := choice.Get("finish_reason"); finishReason.Exists() && finishReason.String() != "" && finishReason.String() != "null" {
@@ -379,16 +395,22 @@ func convertChatCompletionsStreamChunkToCompletions(chunkData []byte) []byte {
 				"index": choice.Get("index").Int(),
 			}
 
-			// Extract text content from delta.content
+			// Extract text content from delta.content or tool_calls/function_call
+			text := ""
 			if delta := choice.Get("delta"); delta.Exists() {
 				if content := delta.Get("content"); content.Exists() && content.String() != "" {
-					completionsChoice["text"] = content.String()
-				} else {
-					completionsChoice["text"] = ""
+					text = content.String()
 				}
-			} else {
-				completionsChoice["text"] = ""
+				// Append tool calls as serialized JSON to text
+				if toolCalls := delta.Get("tool_calls"); toolCalls.Exists() {
+					text += toolCalls.Raw
+				}
+				// Append function call as serialized JSON to text
+				if functionCall := delta.Get("function_call"); functionCall.Exists() {
+					text += functionCall.Raw
+				}
 			}
+			completionsChoice["text"] = text
 
 			// Copy finish_reason
 			if finishReason := choice.Get("finish_reason"); finishReason.Exists() && finishReason.String() != "null" {
@@ -605,8 +627,11 @@ func (h *OpenAIAPIHandler) handleCompletionsStreamingResponse(c *gin.Context, ra
 			// Write the first chunk
 			converted := convertChatCompletionsStreamChunkToCompletions(chunk)
 			if converted != nil {
+				log.Debugf("Stream chunk: %s", string(converted))
 				_, _ = fmt.Fprintf(c.Writer, "data: %s\n\n", string(converted))
 				flusher.Flush()
+			} else {
+				log.Debugf("Stream chunk skipped (nil conversion)")
 			}
 
 			done := make(chan struct{})

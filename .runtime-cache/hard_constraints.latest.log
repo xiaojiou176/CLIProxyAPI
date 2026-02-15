@@ -1,0 +1,12 @@
+[1/6] Build server
+[2/6] Verify sticky selection + session affinity
+ok  	github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth	0.169s
+[3/6] Verify minimum cooldown >=30m + skip frozen auth
+ok  	github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth	0.174s
+[4/6] Verify fatal disable classification + runtime persistence
+ok  	github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth	0.166s
+[5/6] Verify Codex stream terminal + failure parsing
+ok  	github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor	0.178s
+[6/6] Verify runtime binary hash parity (optional)
+  skipped (CHECK_RUNTIME_HASH=0)
+✅ hard constraints verification passed.

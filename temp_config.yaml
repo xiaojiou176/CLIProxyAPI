@@ -1,0 +1,12 @@
+port: 8318
+host: "127.0.0.1"
+auth-dir: "./.cli-proxy-api-test"
+debug: true
+logging-to-file: false
+
+codex-api-key:
+  - api-key: "sk-mock-codex"
+    base-url: "http://localhost:8319/v1"
+    models:
+      - name: "gpt-4-0613"
+        alias: "codex-test"

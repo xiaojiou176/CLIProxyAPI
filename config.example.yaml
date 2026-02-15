@@ -121,6 +121,7 @@ max-retry-interval: 30
 quota-exceeded:
   switch-project: true # Whether to automatically switch to another project when a quota is exceeded
   switch-preview-model: true # Whether to automatically switch to a preview model when a quota is exceeded
+  disable-fatal-accounts: true # Auto-disable deactivated/banned accounts to avoid repeated retries
 
 # Routing strategy for selecting credentials when multiple match.
 routing:

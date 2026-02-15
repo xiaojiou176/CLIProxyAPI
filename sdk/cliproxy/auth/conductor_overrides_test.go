@@ -56,7 +56,7 @@ func TestManager_ShouldRetryAfterError_RespectsAuthRequestRetryOverride(t *testi
 	}
 }
 
-func TestManager_MarkResult_RespectsAuthDisableCoolingOverride(t *testing.T) {
+func TestManager_MarkResult_EnforcesMinimumFailureCooldown(t *testing.T) {
 	prev := quotaCooldownDisabled.Load()
 	quotaCooldownDisabled.Store(false)
 	t.Cleanup(func() { quotaCooldownDisabled.Store(prev) })
@@ -91,7 +91,11 @@ func TestManager_MarkResult_RespectsAuthDisableCoolingOverride(t *testing.T) {
 	if state == nil {
 		t.Fatalf("expected model state to be present")
 	}
-	if !state.NextRetryAfter.IsZero() {
-		t.Fatalf("expected NextRetryAfter to be zero when disable_cooling=true, got %v", state.NextRetryAfter)
+	if state.NextRetryAfter.IsZero() {
+		t.Fatalf("expected NextRetryAfter to be set, got zero")
+	}
+	minExpected := time.Now().Add(29 * time.Minute)
+	if state.NextRetryAfter.Before(minExpected) {
+		t.Fatalf("expected NextRetryAfter >= now+29m, got %v", state.NextRetryAfter)
 	}
 }

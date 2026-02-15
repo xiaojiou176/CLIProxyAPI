@@ -158,6 +158,10 @@ type QuotaExceeded struct {
 
 	// SwitchPreviewModel indicates whether to automatically switch to a preview model when a quota is exceeded.
 	SwitchPreviewModel bool `yaml:"switch-preview-model" json:"switch-preview-model"`
+
+	// DisableFatalAccounts enables automatic disable when encountering fatal auth errors
+	// such as account/workspace deactivation. Keep true to avoid repeatedly selecting dead accounts.
+	DisableFatalAccounts bool `yaml:"disable-fatal-accounts" json:"disable-fatal-accounts"`
 }
 
 // RoutingConfig configures how credentials are selected for requests.
@@ -540,6 +544,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.AccountProxyConstraint.Enabled = false
 	cfg.EgressDeterminism.Enabled = false
 	cfg.EgressDeterminism.DriftAlertThreshold = 1
+	cfg.QuotaExceeded.DisableFatalAccounts = true
 	if err = yaml.Unmarshal(data, &cfg); err != nil {
 		if optional {
 			// In cloud deploy mode, if YAML parsing fails, return empty config instead of error.

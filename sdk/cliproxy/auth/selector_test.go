@@ -34,7 +34,7 @@ func TestFillFirstSelectorPick_Deterministic(t *testing.T) {
 	}
 }
 
-func TestRoundRobinSelectorPick_CyclesDeterministic(t *testing.T) {
+func TestRoundRobinSelectorPick_SticksToCurrentUntilBlocked(t *testing.T) {
 	t.Parallel()
 
 	selector := &RoundRobinSelector{}
@@ -44,7 +44,7 @@ func TestRoundRobinSelectorPick_CyclesDeterministic(t *testing.T) {
 		{ID: "c"},
 	}
 
-	want := []string{"a", "b", "c", "a", "b"}
+	want := []string{"a", "a", "a", "a", "a"}
 	for i, id := range want {
 		got, err := selector.Pick(context.Background(), "gemini", "", cliproxyexecutor.Options{}, auths)
 		if err != nil {
@@ -74,7 +74,7 @@ func TestRoundRobinSelectorPick_SameEmailProjectMultipleCredentials(t *testing.T
 		},
 	}
 
-	want := []string{"a-legacy.json", "b-scoped.json", "a-legacy.json", "b-scoped.json"}
+	want := []string{"a-legacy.json", "a-legacy.json", "a-legacy.json", "a-legacy.json"}
 	for i, id := range want {
 		got, err := selector.Pick(context.Background(), "gemini", "gemini-3.0-pro", cliproxyexecutor.Options{}, auths)
 		if err != nil {
@@ -99,7 +99,7 @@ func TestRoundRobinSelectorPick_PriorityBuckets(t *testing.T) {
 		{ID: "b", Attributes: map[string]string{"priority": "10"}},
 	}
 
-	want := []string{"a", "b", "a", "b"}
+	want := []string{"a", "a", "a", "a"}
 	for i, id := range want {
 		got, err := selector.Pick(context.Background(), "mixed", "", cliproxyexecutor.Options{}, auths)
 		if err != nil {
@@ -205,6 +205,45 @@ func TestRoundRobinSelectorPick_Concurrent(t *testing.T) {
 	case err := <-errCh:
 		t.Fatalf("concurrent Pick() error = %v", err)
 	default:
+	}
+}
+
+func TestRoundRobinSelectorPick_AdvancesOnlyWhenCurrentUnavailable(t *testing.T) {
+	t.Parallel()
+
+	selector := &RoundRobinSelector{}
+	authA := &Auth{ID: "a"}
+	authB := &Auth{ID: "b"}
+	auths := []*Auth{authB, authA}
+
+	first, err := selector.Pick(context.Background(), "codex", "", cliproxyexecutor.Options{}, auths)
+	if err != nil {
+		t.Fatalf("Pick() first error = %v", err)
+	}
+	if first == nil || first.ID != "a" {
+		t.Fatalf("Pick() first auth.ID = %q, want %q", first.ID, "a")
+	}
+
+	// Current account becomes unavailable -> selector should move to next one.
+	authA.Unavailable = true
+	authA.NextRetryAfter = time.Now().Add(30 * time.Minute)
+	second, err := selector.Pick(context.Background(), "codex", "", cliproxyexecutor.Options{}, auths)
+	if err != nil {
+		t.Fatalf("Pick() second error = %v", err)
+	}
+	if second == nil || second.ID != "b" {
+		t.Fatalf("Pick() second auth.ID = %q, want %q", second.ID, "b")
+	}
+
+	// Even if previous account recovers, keep using current until it fails.
+	authA.Unavailable = false
+	authA.NextRetryAfter = time.Time{}
+	third, err := selector.Pick(context.Background(), "codex", "", cliproxyexecutor.Options{}, auths)
+	if err != nil {
+		t.Fatalf("Pick() third error = %v", err)
+	}
+	if third == nil || third.ID != "b" {
+		t.Fatalf("Pick() third auth.ID = %q, want %q", third.ID, "b")
 	}
 }
 
@@ -404,8 +443,8 @@ func TestRoundRobinSelectorPick_ThinkingSuffixSharesCursor(t *testing.T) {
 	if first.ID != "a" {
 		t.Fatalf("Pick() first auth.ID = %q, want %q", first.ID, "a")
 	}
-	if second.ID != "b" {
-		t.Fatalf("Pick() second auth.ID = %q, want %q", second.ID, "b")
+	if second.ID != "a" {
+		t.Fatalf("Pick() second auth.ID = %q, want %q", second.ID, "a")
 	}
 }
 
@@ -430,5 +469,100 @@ func TestRoundRobinSelectorPick_CursorKeyCap(t *testing.T) {
 	}
 	if _, ok := selector.cursors["gemini:m3"]; !ok {
 		t.Fatalf("selector.cursors missing key %q", "gemini:m3")
+	}
+}
+
+func TestRoundRobinSelectorPick_SessionAffinitySticksToSameAuth(t *testing.T) {
+	resetSessionAffinityBindings()
+	selector := &RoundRobinSelector{}
+	auths := []*Auth{
+		{ID: "b"},
+		{ID: "a"},
+	}
+	optsS1 := cliproxyexecutor.Options{
+		Metadata: map[string]any{
+			cliproxyexecutor.SessionAffinityKeyMetadataKey: "session-1",
+		},
+	}
+	optsS2 := cliproxyexecutor.Options{
+		Metadata: map[string]any{
+			cliproxyexecutor.SessionAffinityKeyMetadataKey: "session-2",
+		},
+	}
+
+	first, err := selector.Pick(context.Background(), "codex", "gpt-5.3-codex", optsS1, auths)
+	if err != nil {
+		t.Fatalf("Pick() first error = %v", err)
+	}
+	if first == nil {
+		t.Fatalf("Pick() first auth = nil")
+	}
+	second, err := selector.Pick(context.Background(), "codex", "gpt-5.3-codex", optsS1, auths)
+	if err != nil {
+		t.Fatalf("Pick() second error = %v", err)
+	}
+	if second == nil {
+		t.Fatalf("Pick() second auth = nil")
+	}
+	if first.ID != second.ID {
+		t.Fatalf("same session switched auth: first=%q second=%q", first.ID, second.ID)
+	}
+
+	third, err := selector.Pick(context.Background(), "codex", "gpt-5.3-codex", optsS2, auths)
+	if err != nil {
+		t.Fatalf("Pick() third error = %v", err)
+	}
+	if third == nil {
+		t.Fatalf("Pick() third auth = nil")
+	}
+	if third.ID != first.ID {
+		t.Fatalf("sticky pointer expected same auth for new session, got first=%q third=%q", first.ID, third.ID)
+	}
+}
+
+func TestRoundRobinSelectorPick_SessionAffinityFailsOverAndRebinds(t *testing.T) {
+	resetSessionAffinityBindings()
+	selector := &RoundRobinSelector{}
+	authA := &Auth{ID: "a"}
+	authB := &Auth{ID: "b"}
+	opts := cliproxyexecutor.Options{
+		Metadata: map[string]any{
+			cliproxyexecutor.SessionAffinityKeyMetadataKey: "session-retry",
+		},
+	}
+
+	first, err := selector.Pick(context.Background(), "codex", "gpt-5.3-codex", opts, []*Auth{authA, authB})
+	if err != nil {
+		t.Fatalf("Pick() first error = %v", err)
+	}
+	if first == nil {
+		t.Fatalf("Pick() first auth = nil")
+	}
+	if first.ID != "a" {
+		t.Fatalf("Pick() first auth.ID = %q, want %q", first.ID, "a")
+	}
+
+	// Simulate same request retry with tried map excluding previous auth "a".
+	failedOver, err := selector.Pick(context.Background(), "codex", "gpt-5.3-codex", opts, []*Auth{authB})
+	if err != nil {
+		t.Fatalf("Pick() failedOver error = %v", err)
+	}
+	if failedOver == nil {
+		t.Fatalf("Pick() failedOver auth = nil")
+	}
+	if failedOver.ID != "b" {
+		t.Fatalf("Pick() failedOver auth.ID = %q, want %q", failedOver.ID, "b")
+	}
+
+	// After failover, the same session should stay on the new auth.
+	rebound, err := selector.Pick(context.Background(), "codex", "gpt-5.3-codex", opts, []*Auth{authA, authB})
+	if err != nil {
+		t.Fatalf("Pick() rebound error = %v", err)
+	}
+	if rebound == nil {
+		t.Fatalf("Pick() rebound auth = nil")
+	}
+	if rebound.ID != "b" {
+		t.Fatalf("Pick() rebound auth.ID = %q, want %q", rebound.ID, "b")
 	}
 }

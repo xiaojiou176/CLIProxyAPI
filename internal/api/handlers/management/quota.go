@@ -16,3 +16,11 @@ func (h *Handler) GetSwitchPreviewModel(c *gin.Context) {
 func (h *Handler) PutSwitchPreviewModel(c *gin.Context) {
 	h.updateBoolField(c, func(v bool) { h.cfg.QuotaExceeded.SwitchPreviewModel = v })
 }
+
+func (h *Handler) GetDisableFatalAccounts(c *gin.Context) {
+	c.JSON(200, gin.H{"disable-fatal-accounts": h.cfg.QuotaExceeded.DisableFatalAccounts})
+}
+
+func (h *Handler) PutDisableFatalAccounts(c *gin.Context) {
+	h.updateBoolField(c, func(v bool) { h.cfg.QuotaExceeded.DisableFatalAccounts = v })
+}

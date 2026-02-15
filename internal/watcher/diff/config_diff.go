@@ -77,6 +77,9 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	if oldCfg.QuotaExceeded.SwitchPreviewModel != newCfg.QuotaExceeded.SwitchPreviewModel {
 		changes = append(changes, fmt.Sprintf("quota-exceeded.switch-preview-model: %t -> %t", oldCfg.QuotaExceeded.SwitchPreviewModel, newCfg.QuotaExceeded.SwitchPreviewModel))
 	}
+	if oldCfg.QuotaExceeded.DisableFatalAccounts != newCfg.QuotaExceeded.DisableFatalAccounts {
+		changes = append(changes, fmt.Sprintf("quota-exceeded.disable-fatal-accounts: %t -> %t", oldCfg.QuotaExceeded.DisableFatalAccounts, newCfg.QuotaExceeded.DisableFatalAccounts))
+	}
 
 	if oldCfg.Routing.Strategy != newCfg.Routing.Strategy {
 		changes = append(changes, fmt.Sprintf("routing.strategy: %s -> %s", oldCfg.Routing.Strategy, newCfg.Routing.Strategy))

@@ -178,3 +178,23 @@ func TestApplyAPIKeyModelAlias(t *testing.T) {
 		})
 	}
 }
+
+func TestApplyAPIKeyModelAlias_BlocksMiniDowngradeForCodex(t *testing.T) {
+	cfg := &internalconfig.Config{
+		CodexKey: []internalconfig.CodexKey{
+			{APIKey: "k-codex", Models: []internalconfig.CodexModel{{Name: "gpt-5.1-codex-mini", Alias: "gpt-5.3-codex"}}},
+		},
+	}
+
+	mgr := NewManager(nil, nil, nil)
+	mgr.SetConfig(cfg)
+
+	ctx := context.Background()
+	auth := &Auth{ID: "codex-auth", Provider: "codex", Attributes: map[string]string{"api_key": "k-codex"}}
+	_, _ = mgr.Register(ctx, auth)
+
+	got := mgr.applyAPIKeyModelAlias(auth, "gpt-5.3-codex")
+	if got != "gpt-5.3-codex" {
+		t.Fatalf("applyAPIKeyModelAlias() = %q, want %q", got, "gpt-5.3-codex")
+	}
+}

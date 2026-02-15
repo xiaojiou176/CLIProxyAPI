@@ -7,11 +7,13 @@ import (
 	"context"
 	"errors"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy"
 	log "github.com/sirupsen/logrus"
 )
@@ -25,6 +27,16 @@ import (
 //   - configPath: The path to the configuration file
 //   - localPassword: Optional password accepted for local management requests
 func StartService(cfg *config.Config, configPath string, localPassword string) {
+	// Initialize usage statistics persistence
+	// Save every 5 minutes to avoid data loss on unexpected shutdown
+	configDir := filepath.Dir(configPath)
+	persistenceManager := usage.InitPersistence(configDir, 5*time.Minute)
+	if persistenceManager != nil {
+		persistenceManager.Start()
+		defer persistenceManager.Stop()
+		log.Infof("usage statistics persistence enabled, file: %s", persistenceManager.FilePath())
+	}
+
 	builder := cliproxy.NewBuilder().
 		WithConfig(cfg).
 		WithConfigPath(configPath).

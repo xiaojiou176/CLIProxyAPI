@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "updated_at": "2026-02-14T04:28:35.182146Z",
+  "updated_at": "2026-02-15T04:13:18.209468Z",
   "accounts": {
     "antigravity-terry@casium.com.json": {
       "proxy_identity": "http://127.0.0.1:8889",
@@ -66,7 +66,7 @@
       "proxy_identity": "direct",
       "proxy_digest": "d15690f08a575024650b01ffac892cfd2b93e6c57c140f1b6d9e47753cabd579",
       "first_seen_at": "2026-02-14T02:48:11.051307Z",
-      "last_seen_at": "2026-02-14T02:49:27.901358Z",
+      "last_seen_at": "2026-02-15T03:50:32.008361Z",
       "drift_count": 0,
       "last_drift_at": "0001-01-01T00:00:00Z",
       "last_provider": "codex",
@@ -171,6 +171,56 @@
       "last_drift_at": "0001-01-01T00:00:00Z",
       "last_provider": "codex",
       "last_model": "gpt-5.2-codex"
+    },
+    "codex-edfd6082-chatgpt79@xiaojiou176.me-team.json": {
+      "proxy_identity": "direct",
+      "proxy_digest": "d15690f08a575024650b01ffac892cfd2b93e6c57c140f1b6d9e47753cabd579",
+      "first_seen_at": "2026-02-14T23:18:26.228267Z",
+      "last_seen_at": "2026-02-14T23:18:36.80652Z",
+      "drift_count": 0,
+      "last_drift_at": "0001-01-01T00:00:00Z",
+      "last_provider": "codex",
+      "last_model": "gpt-5.3-codex"
+    },
+    "codex-edfd6082-chatgpt80@xiaojiou176.me-team.json": {
+      "proxy_identity": "direct",
+      "proxy_digest": "d15690f08a575024650b01ffac892cfd2b93e6c57c140f1b6d9e47753cabd579",
+      "first_seen_at": "2026-02-14T23:20:45.592391Z",
+      "last_seen_at": "2026-02-14T23:21:04.147106Z",
+      "drift_count": 0,
+      "last_drift_at": "0001-01-01T00:00:00Z",
+      "last_provider": "codex",
+      "last_model": "gpt-5.3-codex"
+    },
+    "codex-f81355a0-chatgpt86@xiaojiou176.me-team.json": {
+      "proxy_identity": "direct",
+      "proxy_digest": "d15690f08a575024650b01ffac892cfd2b93e6c57c140f1b6d9e47753cabd579",
+      "first_seen_at": "2026-02-14T23:22:57.90017Z",
+      "last_seen_at": "2026-02-14T23:22:57.90017Z",
+      "drift_count": 0,
+      "last_drift_at": "0001-01-01T00:00:00Z",
+      "last_provider": "codex",
+      "last_model": "gpt-5.3-codex"
+    },
+    "codex-fcb7fa45-chatgpt81@xiaojiou176.me-team.json": {
+      "proxy_identity": "direct",
+      "proxy_digest": "d15690f08a575024650b01ffac892cfd2b93e6c57c140f1b6d9e47753cabd579",
+      "first_seen_at": "2026-02-15T03:50:32.338357Z",
+      "last_seen_at": "2026-02-15T04:13:05.446667Z",
+      "drift_count": 0,
+      "last_drift_at": "0001-01-01T00:00:00Z",
+      "last_provider": "codex",
+      "last_model": "gpt-5.3-codex"
+    },
+    "codex-fcb7fa45-chatgpt82@xiaojiou176.me-team.json": {
+      "proxy_identity": "direct",
+      "proxy_digest": "d15690f08a575024650b01ffac892cfd2b93e6c57c140f1b6d9e47753cabd579",
+      "first_seen_at": "2026-02-15T04:13:18.209468Z",
+      "last_seen_at": "2026-02-15T04:13:18.209468Z",
+      "drift_count": 0,
+      "last_drift_at": "0001-01-01T00:00:00Z",
+      "last_provider": "codex",
+      "last_model": "gpt-5.3-codex"
     },
     "gemini-xiaojiou176@gmail.com-gmail-manager-485502.json": {
       "proxy_identity": "http://127.0.0.1:8890",

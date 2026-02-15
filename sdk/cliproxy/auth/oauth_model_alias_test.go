@@ -194,3 +194,22 @@ func TestApplyOAuthModelAlias_SuffixPreservation(t *testing.T) {
 		t.Errorf("applyOAuthModelAlias() model = %q, want %q", resolvedModel, "gemini-2.5-pro-exp-03-25(8192)")
 	}
 }
+
+func TestApplyOAuthModelAlias_BlocksMiniDowngrade(t *testing.T) {
+	t.Parallel()
+
+	aliases := map[string][]internalconfig.OAuthModelAlias{
+		"codex": {{Name: "gpt-5.1-codex-mini", Alias: "gpt-5.3-codex"}},
+	}
+
+	mgr := NewManager(nil, nil, nil)
+	mgr.SetConfig(&internalconfig.Config{})
+	mgr.SetOAuthModelAlias(aliases)
+
+	auth := &Auth{ID: "codex-auth", Provider: "codex", Attributes: map[string]string{"auth_kind": "oauth"}}
+
+	got := mgr.applyOAuthModelAlias(auth, "gpt-5.3-codex")
+	if got != "gpt-5.3-codex" {
+		t.Fatalf("applyOAuthModelAlias() = %q, want %q", got, "gpt-5.3-codex")
+	}
+}

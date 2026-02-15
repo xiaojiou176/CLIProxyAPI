@@ -479,6 +479,8 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/usage", s.mgmt.GetUsageStatistics)
 		mgmt.GET("/usage/export", s.mgmt.ExportUsageStatistics)
 		mgmt.POST("/usage/import", s.mgmt.ImportUsageStatistics)
+		mgmt.GET("/usage/stream", s.mgmt.StreamUsageEvents)  // SSE real-time events
+		mgmt.GET("/usage/history", s.mgmt.GetRequestHistory) // Request history with pagination
 		mgmt.GET("/egress-mapping", s.mgmt.GetEgressMapping)
 		mgmt.GET("/config", s.mgmt.GetConfig)
 		mgmt.GET("/config.yaml", s.mgmt.GetConfigYAML)
@@ -519,6 +521,10 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/quota-exceeded/switch-preview-model", s.mgmt.GetSwitchPreviewModel)
 		mgmt.PUT("/quota-exceeded/switch-preview-model", s.mgmt.PutSwitchPreviewModel)
 		mgmt.PATCH("/quota-exceeded/switch-preview-model", s.mgmt.PutSwitchPreviewModel)
+
+		mgmt.GET("/quota-exceeded/disable-fatal-accounts", s.mgmt.GetDisableFatalAccounts)
+		mgmt.PUT("/quota-exceeded/disable-fatal-accounts", s.mgmt.PutDisableFatalAccounts)
+		mgmt.PATCH("/quota-exceeded/disable-fatal-accounts", s.mgmt.PutDisableFatalAccounts)
 
 		mgmt.GET("/api-keys", s.mgmt.GetAPIKeys)
 		mgmt.PUT("/api-keys", s.mgmt.PutAPIKeys)

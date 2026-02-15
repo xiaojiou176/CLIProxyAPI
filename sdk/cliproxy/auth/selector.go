@@ -19,7 +19,7 @@ import (
 // RoundRobinSelector provides a simple provider scoped round-robin selection strategy.
 type RoundRobinSelector struct {
 	mu      sync.Mutex
-	cursors map[string]int
+	cursors map[string]string
 	maxKeys int
 }
 
@@ -27,6 +27,24 @@ type RoundRobinSelector struct {
 // This "burns" one account before moving to the next, which can help stagger
 // rolling-window subscription caps (e.g. chat message limits).
 type FillFirstSelector struct{}
+
+type sessionAffinityBinding struct {
+	AuthID    string
+	ExpiresAt time.Time
+}
+
+const sessionAffinityTTL = 30 * time.Minute
+
+var (
+	sessionAffinityMu       sync.Mutex
+	sessionAffinityBindings = map[string]sessionAffinityBinding{}
+)
+
+func resetSessionAffinityBindings() {
+	sessionAffinityMu.Lock()
+	defer sessionAffinityMu.Unlock()
+	clear(sessionAffinityBindings)
+}
 
 type blockReason int
 
@@ -134,6 +152,60 @@ func canonicalModelKey(model string) string {
 	return modelName
 }
 
+func sessionAffinityKey(provider, model string, opts cliproxyexecutor.Options) string {
+	if len(opts.Metadata) == 0 {
+		return ""
+	}
+	raw, ok := opts.Metadata[cliproxyexecutor.SessionAffinityKeyMetadataKey]
+	if !ok || raw == nil {
+		return ""
+	}
+	sessionID, ok := raw.(string)
+	if !ok {
+		return ""
+	}
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return ""
+	}
+	return provider + "|" + canonicalModelKey(model) + "|" + sessionID
+}
+
+func cleanupSessionAffinityLocked(now time.Time) {
+	for key, binding := range sessionAffinityBindings {
+		if binding.ExpiresAt.IsZero() || !binding.ExpiresAt.After(now) {
+			delete(sessionAffinityBindings, key)
+		}
+	}
+}
+
+func loadSessionAffinity(key string, now time.Time) string {
+	if key == "" {
+		return ""
+	}
+	sessionAffinityMu.Lock()
+	defer sessionAffinityMu.Unlock()
+	cleanupSessionAffinityLocked(now)
+	binding, ok := sessionAffinityBindings[key]
+	if !ok {
+		return ""
+	}
+	return binding.AuthID
+}
+
+func storeSessionAffinity(key, authID string, now time.Time) {
+	if key == "" || strings.TrimSpace(authID) == "" {
+		return
+	}
+	sessionAffinityMu.Lock()
+	defer sessionAffinityMu.Unlock()
+	cleanupSessionAffinityLocked(now)
+	sessionAffinityBindings[key] = sessionAffinityBinding{
+		AuthID:    authID,
+		ExpiresAt: now.Add(sessionAffinityTTL),
+	}
+}
+
 func collectAvailableByPriority(auths []*Auth, model string, now time.Time) (available map[int][]*Auth, cooldownCount int, earliest time.Time) {
 	available = make(map[int][]*Auth)
 	for i := 0; i < len(auths); i++ {
@@ -191,49 +263,97 @@ func getAvailableAuths(auths []*Auth, provider, model string, now time.Time) ([]
 	return available, nil
 }
 
-// Pick selects the next available auth for the provider in a round-robin manner.
+// Pick selects auths using sticky pointer semantics:
+// keep using the current credential while it remains usable; only move when it is blocked.
 func (s *RoundRobinSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
 	_ = ctx
-	_ = opts
 	now := time.Now()
 	available, err := getAvailableAuths(auths, provider, model, now)
 	if err != nil {
 		return nil, err
 	}
+	affinityKey := sessionAffinityKey(provider, model, opts)
+	if pinnedID := loadSessionAffinity(affinityKey, now); pinnedID != "" {
+		for idx, candidate := range available {
+			if candidate != nil && candidate.ID == pinnedID {
+				key := provider + ":" + canonicalModelKey(model)
+				s.mu.Lock()
+				if s.cursors == nil {
+					s.cursors = make(map[string]string)
+				}
+				s.cursors[key] = available[idx].ID
+				s.mu.Unlock()
+				storeSessionAffinity(affinityKey, candidate.ID, now)
+				return candidate, nil
+			}
+		}
+	}
 	key := provider + ":" + canonicalModelKey(model)
 	s.mu.Lock()
 	if s.cursors == nil {
-		s.cursors = make(map[string]int)
+		s.cursors = make(map[string]string)
 	}
 	limit := s.maxKeys
 	if limit <= 0 {
 		limit = 4096
 	}
-	if _, ok := s.cursors[key]; !ok && len(s.cursors) >= limit {
-		s.cursors = make(map[string]int)
+	lastSelectedID, hasCursor := s.cursors[key]
+	if !hasCursor && len(s.cursors) >= limit {
+		s.cursors = make(map[string]string)
+		lastSelectedID = ""
+		hasCursor = false
 	}
-	index := s.cursors[key]
-
-	if index >= 2_147_483_640 {
-		index = 0
+	selected := available[0]
+	if hasCursor && strings.TrimSpace(lastSelectedID) != "" {
+		foundCurrent := false
+		for i := 0; i < len(available); i++ {
+			if available[i] != nil && available[i].ID == lastSelectedID {
+				selected = available[i]
+				foundCurrent = true
+				break
+			}
+		}
+		// Previous credential is no longer available: advance deterministically to the
+		// next ID in sorted order, wrapping around.
+		if !foundCurrent {
+			nextIdx := sort.Search(len(available), func(i int) bool {
+				if available[i] == nil {
+					return false
+				}
+				return available[i].ID > lastSelectedID
+			})
+			if nextIdx >= len(available) {
+				nextIdx = 0
+			}
+			selected = available[nextIdx]
+		}
 	}
-
-	s.cursors[key] = index + 1
+	s.cursors[key] = selected.ID
 	s.mu.Unlock()
-	// log.Debugf("available: %d, index: %d, key: %d", len(available), index, index%len(available))
-	return available[index%len(available)], nil
+	storeSessionAffinity(affinityKey, selected.ID, now)
+	return selected, nil
 }
 
 // Pick selects the first available auth for the provider in a deterministic manner.
 func (s *FillFirstSelector) Pick(ctx context.Context, provider, model string, opts cliproxyexecutor.Options, auths []*Auth) (*Auth, error) {
 	_ = ctx
-	_ = opts
 	now := time.Now()
 	available, err := getAvailableAuths(auths, provider, model, now)
 	if err != nil {
 		return nil, err
 	}
-	return available[0], nil
+	affinityKey := sessionAffinityKey(provider, model, opts)
+	if pinnedID := loadSessionAffinity(affinityKey, now); pinnedID != "" {
+		for _, candidate := range available {
+			if candidate != nil && candidate.ID == pinnedID {
+				storeSessionAffinity(affinityKey, candidate.ID, now)
+				return candidate, nil
+			}
+		}
+	}
+	selected := available[0]
+	storeSessionAffinity(affinityKey, selected.ID, now)
+	return selected, nil
 }
 
 func isAuthBlockedForModel(auth *Auth, model string, now time.Time) (bool, blockReason, time.Time) {

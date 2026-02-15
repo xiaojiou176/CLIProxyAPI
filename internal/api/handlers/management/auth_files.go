@@ -413,6 +413,30 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 	if !auth.LastRefreshedAt.IsZero() {
 		entry["last_refresh"] = auth.LastRefreshedAt
 	}
+	if !auth.NextRetryAfter.IsZero() {
+		entry["next_retry_after"] = auth.NextRetryAfter
+	}
+	if !auth.Quota.NextRecoverAt.IsZero() {
+		entry["next_recover_at"] = auth.Quota.NextRecoverAt
+	}
+
+	errorKind, errorReason, errorCode := authErrorEvidence(auth)
+	if errorKind != "" {
+		entry["error_kind"] = errorKind
+		entry["last_error_kind"] = errorKind
+	}
+	if errorReason != "" {
+		entry["error_reason"] = errorReason
+	}
+	if errorCode > 0 {
+		entry["error_code"] = errorCode
+	}
+	if frozenUntil, freezeScope := authFreezeEvidence(auth); !frozenUntil.IsZero() {
+		entry["frozen_until"] = frozenUntil
+		entry["freeze_scope"] = freezeScope
+	}
+	entry["disabled_by_policy"] = isDisabledByPolicy(auth)
+
 	if path != "" {
 		entry["path"] = path
 		entry["source"] = "file"
@@ -500,6 +524,75 @@ func authAttribute(auth *coreauth.Auth, key string) string {
 		return ""
 	}
 	return auth.Attributes[key]
+}
+
+func authErrorEvidence(auth *coreauth.Auth) (kind string, reason string, code int) {
+	if auth == nil {
+		return "", "", 0
+	}
+	if auth.LastError != nil {
+		kind = strings.TrimSpace(auth.LastError.Code)
+		reason = strings.TrimSpace(auth.LastError.Message)
+		code = auth.LastError.HTTPStatus
+	}
+	if kind == "" {
+		kind = disabledPolicyKind(auth)
+	}
+	if reason == "" {
+		reason = strings.TrimSpace(auth.StatusMessage)
+	}
+	return kind, reason, code
+}
+
+func authFreezeEvidence(auth *coreauth.Auth) (time.Time, string) {
+	if auth == nil {
+		return time.Time{}, ""
+	}
+	now := time.Now()
+	frozenUntil := time.Time{}
+	scope := ""
+
+	if auth.NextRetryAfter.After(now) {
+		frozenUntil = auth.NextRetryAfter
+		scope = "account"
+	}
+	if auth.Quota.NextRecoverAt.After(now) && auth.Quota.NextRecoverAt.After(frozenUntil) {
+		frozenUntil = auth.Quota.NextRecoverAt
+		scope = "account"
+	}
+
+	for _, state := range auth.ModelStates {
+		if state == nil {
+			continue
+		}
+		if state.NextRetryAfter.After(now) && state.NextRetryAfter.After(frozenUntil) {
+			frozenUntil = state.NextRetryAfter
+			scope = "model"
+		}
+		if state.Quota.NextRecoverAt.After(now) && state.Quota.NextRecoverAt.After(frozenUntil) {
+			frozenUntil = state.Quota.NextRecoverAt
+			scope = "model"
+		}
+	}
+	return frozenUntil, scope
+}
+
+func isDisabledByPolicy(auth *coreauth.Auth) bool {
+	if auth == nil || !auth.Disabled {
+		return false
+	}
+	return strings.HasPrefix(strings.TrimSpace(auth.StatusMessage), "disabled_by_policy:")
+}
+
+func disabledPolicyKind(auth *coreauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	msg := strings.TrimSpace(auth.StatusMessage)
+	if !strings.HasPrefix(msg, "disabled_by_policy:") {
+		return ""
+	}
+	return strings.TrimPrefix(msg, "disabled_by_policy:")
 }
 
 func isRuntimeOnlyAuth(auth *coreauth.Auth) bool {
@@ -804,6 +897,22 @@ func (h *Handler) PatchAuthFileStatus(c *gin.Context) {
 	} else {
 		targetAuth.Status = coreauth.StatusActive
 		targetAuth.StatusMessage = ""
+		targetAuth.Unavailable = false
+		targetAuth.NextRetryAfter = time.Time{}
+		targetAuth.Quota = coreauth.QuotaState{}
+		targetAuth.LastError = nil
+		for _, state := range targetAuth.ModelStates {
+			if state == nil {
+				continue
+			}
+			state.Status = coreauth.StatusActive
+			state.Unavailable = false
+			state.StatusMessage = ""
+			state.NextRetryAfter = time.Time{}
+			state.LastError = nil
+			state.Quota = coreauth.QuotaState{}
+			state.UpdatedAt = time.Now()
+		}
 	}
 	targetAuth.UpdatedAt = time.Now()
 
