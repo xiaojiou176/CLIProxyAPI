@@ -27,6 +27,8 @@ auths/*
 
 # Documentation
 docs/*
+!docs/documentation-policy.md
+!docs/debug-runbook.md
 AGENTS.md
 CLAUDE.md
 GEMINI.md

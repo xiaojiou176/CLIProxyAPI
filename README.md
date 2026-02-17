@@ -64,6 +64,27 @@ CLIProxyAPI Guides: [https://help.router-for.me/](https://help.router-for.me/)
 
 see [MANAGEMENT_API.md](https://help.router-for.me/management/api)
 
+## Request Log Semantics
+
+CLIProxyAPI exposes request-audit controls and request-log retrieval under management routes.
+
+- Management toggles:
+  - `GET/PUT/PATCH /v0/management/request-log`
+  - `GET/PUT/PATCH /v0/management/logging-to-file`
+  - `GET/PUT/PATCH /v0/management/error-logs-max-files`
+- Log retrieval:
+  - `GET /v0/management/request-log-by-id/:id`
+  - `GET /v0/management/request-error-logs`
+- Correlation:
+  - Each request is tagged with a generated request ID and propagated through middleware/logging.
+- Capture behavior:
+  - Request logging middleware captures request/response headers, body, status code, and upstream API request/response sections.
+  - Upstream request section now includes `Prompt Debug` lines extracted from JSON payload (`system`, `messages`, `input`, `contents`, `prompt`) for fast prompt-chain debugging.
+  - Query/header/auth fields in request logs are recorded in raw form (no masking).
+  - Management routes are excluded from request payload logging.
+- Storage path:
+  - Request log files are written under `logs/` (or `<WRITABLE_PATH>/logs` when `WRITABLE_PATH` is configured).
+
 ## Amp CLI Support
 
 CLIProxyAPI includes integrated support for [Amp CLI](https://ampcode.com) and Amp IDE extensions, enabling you to use your Google/ChatGPT/Claude OAuth subscriptions with Amp's coding tools:
@@ -82,7 +103,14 @@ CLIProxyAPI includes integrated support for [Amp CLI](https://ampcode.com) and A
 - Advanced (executors & translators): [docs/sdk-advanced.md](docs/sdk-advanced.md)
 - Access: [docs/sdk-access.md](docs/sdk-access.md)
 - Watcher: [docs/sdk-watcher.md](docs/sdk-watcher.md)
+- Debug runbook: [docs/debug-runbook.md](docs/debug-runbook.md)
 - Custom Provider Example: `examples/custom-provider`
+
+## Documentation Governance
+
+- Policy: [docs/documentation-policy.md](docs/documentation-policy.md)
+- Local gate: `./scripts/doc-ci-gate.sh`
+- CI gate: `.github/workflows/doc-governance.yml`
 
 ## Contributing
 
