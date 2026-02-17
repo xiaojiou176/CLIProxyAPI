@@ -10,8 +10,23 @@ env:
   DOCKERHUB_REPO: eceasy/cli-proxy-api
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Run tests
+        run: go test ./...
+
   docker_amd64:
     runs-on: ubuntu-latest
+    needs: test
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -43,6 +58,7 @@ jobs:
 
   docker_arm64:
     runs-on: ubuntu-24.04-arm
+    needs: test
     steps:
       - name: Checkout
         uses: actions/checkout@v4

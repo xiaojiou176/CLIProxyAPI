@@ -13,7 +13,6 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 )
@@ -22,6 +21,9 @@ const (
 	apiAttemptsKey = "API_UPSTREAM_ATTEMPTS"
 	apiRequestKey  = "API_REQUEST"
 	apiResponseKey = "API_RESPONSE"
+
+	promptDebugMaxEntries = 24
+	promptDebugMaxLength  = 320
 )
 
 // upstreamRequestLog captures the outbound upstream request details for logging.
@@ -84,6 +86,8 @@ func recordAPIRequest(ctx context.Context, cfg *config.Config, info upstreamRequ
 	} else {
 		builder.WriteString("<empty>")
 	}
+	builder.WriteString("\n\nPrompt Debug:\n")
+	builder.WriteString(buildPromptDebugSection(info.Body))
 	builder.WriteString("\n\n")
 
 	attempt := &upstreamAttempt{
@@ -279,8 +283,7 @@ func writeHeaders(builder *strings.Builder, headers http.Header) {
 			continue
 		}
 		for _, value := range values {
-			masked := util.MaskSensitiveHeaderValue(key, value)
-			builder.WriteString(fmt.Sprintf("%s: %s\n", key, masked))
+			builder.WriteString(fmt.Sprintf("%s: %s\n", key, value))
 		}
 	}
 }
@@ -302,7 +305,7 @@ func formatAuthInfo(info upstreamRequestLog) string {
 	switch authType {
 	case "api_key":
 		if authValue != "" {
-			parts = append(parts, fmt.Sprintf("type=api_key value=%s", util.HideAPIKey(authValue)))
+			parts = append(parts, fmt.Sprintf("type=api_key value=%s", authValue))
 		} else {
 			parts = append(parts, "type=api_key")
 		}
@@ -319,6 +322,148 @@ func formatAuthInfo(info upstreamRequestLog) string {
 	}
 
 	return strings.Join(parts, ", ")
+}
+
+func buildPromptDebugSection(body []byte) string {
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 {
+		return "- <empty body>"
+	}
+	if !gjson.ValidBytes(trimmed) {
+		return "- <non-json body>"
+	}
+
+	lines := make([]string, 0, 8)
+
+	appendSystemPromptLines(&lines, gjson.GetBytes(trimmed, "system"))
+	appendMessagePromptLines(&lines, "messages", gjson.GetBytes(trimmed, "messages"))
+	appendMessagePromptLines(&lines, "input", gjson.GetBytes(trimmed, "input"))
+	appendMessagePromptLines(&lines, "contents", gjson.GetBytes(trimmed, "contents"))
+
+	prompt := gjson.GetBytes(trimmed, "prompt")
+	if prompt.Exists() {
+		appendPromptLine(&lines, "prompt", "direct", promptTextFromContent(prompt))
+	}
+
+	if len(lines) == 0 {
+		return "- <no prompt fields detected>"
+	}
+	return strings.Join(lines, "\n")
+}
+
+func appendSystemPromptLines(lines *[]string, system gjson.Result) {
+	if !system.Exists() {
+		return
+	}
+	if system.IsArray() {
+		index := 0
+		system.ForEach(func(_, item gjson.Result) bool {
+			index++
+			appendPromptLine(lines, fmt.Sprintf("system[%d]", index), "system", promptTextFromContent(item))
+			return len(*lines) < promptDebugMaxEntries
+		})
+		return
+	}
+
+	appendPromptLine(lines, "system", "system", promptTextFromContent(system))
+}
+
+func appendMessagePromptLines(lines *[]string, label string, collection gjson.Result) {
+	if !collection.Exists() || !collection.IsArray() {
+		return
+	}
+	index := 0
+	collection.ForEach(func(_, item gjson.Result) bool {
+		index++
+		role := strings.TrimSpace(item.Get("role").String())
+		if role == "" {
+			role = strings.TrimSpace(item.Get("type").String())
+		}
+		if role == "" {
+			role = "unknown"
+		}
+
+		text := promptTextFromContent(item.Get("content"))
+		if text == "" {
+			text = promptTextFromContent(item.Get("parts"))
+		}
+		if text == "" {
+			text = promptTextFromContent(item.Get("text"))
+		}
+		if text == "" {
+			text = promptTextFromContent(item)
+		}
+
+		appendPromptLine(lines, fmt.Sprintf("%s[%d]", label, index), role, text)
+		return len(*lines) < promptDebugMaxEntries
+	})
+}
+
+func appendPromptLine(lines *[]string, label, role, rawText string) {
+	if len(*lines) >= promptDebugMaxEntries {
+		return
+	}
+	text := normalizePromptText(rawText)
+	if text == "" {
+		return
+	}
+	*lines = append(*lines, fmt.Sprintf("- %s (%s, chars=%d): %s", label, role, len(text), text))
+}
+
+func promptTextFromContent(content gjson.Result) string {
+	if !content.Exists() {
+		return ""
+	}
+	switch {
+	case content.Type == gjson.String:
+		return content.String()
+	case content.IsArray():
+		parts := make([]string, 0, 4)
+		content.ForEach(func(_, item gjson.Result) bool {
+			text := promptTextFromContent(item)
+			if text != "" {
+				parts = append(parts, text)
+			}
+			return len(parts) < 8
+		})
+		return strings.Join(parts, "\n")
+	case content.IsObject():
+		text := strings.TrimSpace(content.Get("text").String())
+		if text != "" {
+			return text
+		}
+		parts := promptTextFromContent(content.Get("parts"))
+		if parts != "" {
+			return parts
+		}
+		nested := promptTextFromContent(content.Get("content"))
+		if nested != "" {
+			return nested
+		}
+		inputText := strings.TrimSpace(content.Get("input_text").String())
+		if inputText != "" {
+			return inputText
+		}
+		fallback := strings.TrimSpace(content.String())
+		if fallback != "{}" {
+			return fallback
+		}
+		return ""
+	default:
+		return strings.TrimSpace(content.String())
+	}
+}
+
+func normalizePromptText(raw string) string {
+	text := strings.TrimSpace(raw)
+	if text == "" {
+		return ""
+	}
+	text = strings.Join(strings.Fields(text), " ")
+	if len(text) <= promptDebugMaxLength {
+		return text
+	}
+	return text[:promptDebugMaxLength] + "...<truncated>"
 }
 
 func summarizeErrorBody(contentType string, body []byte) string {

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1107,7 +1108,7 @@ func TestLoadFileClientsWalkError(t *testing.T) {
 		t.Fatalf("failed to create noaccess dir: %v", err)
 	}
 	if err := os.Chmod(noAccessDir, 0); err != nil {
-		t.Skipf("chmod not supported: %v", err)
+		t.Skipf("chmod not supported on %s/%s (permission-path test skipped): %v", runtime.GOOS, runtime.GOARCH, err)
 	}
 	defer func() { _ = os.Chmod(noAccessDir, 0o755) }()
 

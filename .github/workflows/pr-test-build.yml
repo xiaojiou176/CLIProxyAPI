@@ -9,6 +9,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -21,3 +22,5 @@ jobs:
         run: |
           go build -o test-output ./cmd/server
           rm -f test-output
+      - name: Test
+        run: go test ./...

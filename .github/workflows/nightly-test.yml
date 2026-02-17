@@ -1,0 +1,45 @@
+name: nightly-test
+
+on:
+  schedule:
+    - cron: "50 2 * * *"
+  workflow_dispatch:
+
+jobs:
+  go-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Run tests
+        run: go test ./...
+      - name: Run fuzz smoke (thinking suffix parser)
+        run: go test ./internal/thinking -run=^$ -fuzz=FuzzParseSuffix -fuzztime=15s
+      - name: Install go-mutesting
+        run: go install github.com/avito-tech/go-mutesting/cmd/go-mutesting@latest
+      - name: Run mutation guard (thinking suffix parser)
+        env:
+          MAX_MUTATION_SCORE: "0.65"
+        run: |
+          set -euo pipefail
+          output_path="${RUNNER_TEMP}/mutation-thinking-suffix.txt"
+          "$(go env GOPATH)/bin/go-mutesting" ./internal/thinking/suffix.go --exec-timeout 30 | tee "${output_path}"
+          score="$(grep -Eo 'The mutation score is [0-9.]+' "${output_path}" | awk '{print $5}' | tail -1)"
+          if [[ -z "${score}" ]]; then
+            echo "failed to parse mutation score"
+            exit 1
+          fi
+          echo "mutation_score=${score} max_allowed=${MAX_MUTATION_SCORE}"
+          awk -v score="${score}" -v max_allowed="${MAX_MUTATION_SCORE}" 'BEGIN { if (score <= max_allowed) exit 0; exit 1 }'
+      - name: Upload mutation report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutation-thinking-suffix
+          path: ${{ runner.temp }}/mutation-thinking-suffix.txt

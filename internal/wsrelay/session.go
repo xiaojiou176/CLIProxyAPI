@@ -107,7 +107,7 @@ func (s *session) dispatch(msg Message) {
 		req := value.(*pendingRequest)
 		select {
 		case req.ch <- msg:
-		default:
+		case <-s.closed:
 		}
 		if msg.Type == MessageTypeHTTPResp || msg.Type == MessageTypeError || msg.Type == MessageTypeStreamEnd {
 			if actual, loaded := s.pending.LoadAndDelete(msg.ID); loaded {
@@ -174,7 +174,7 @@ func (s *session) cleanup(cause error) {
 			msg := Message{ID: key.(string), Type: MessageTypeError, Payload: map[string]any{"error": cause.Error()}}
 			select {
 			case req.ch <- msg:
-			default:
+			case <-time.After(200 * time.Millisecond):
 			}
 			req.close()
 			return true

@@ -17,6 +17,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/promptqueue"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -47,6 +48,7 @@ type ErrorDetail struct {
 }
 
 const idempotencyKeyMetadataKey = "idempotency_key"
+const submissionIDMetadataKey = "submission_id"
 
 const (
 	defaultStreamingKeepAliveSeconds = 0
@@ -232,6 +234,9 @@ type BaseAPIHandler struct {
 
 	// Cfg holds the current application configuration.
 	Cfg *config.SDKConfig
+
+	// PromptQueue serialises per-session prompts with durable journaling.
+	PromptQueue *promptqueue.Manager
 }
 
 // NewBaseAPIHandlers creates a new API handlers instance.
@@ -247,6 +252,7 @@ func NewBaseAPIHandlers(cfg *config.SDKConfig, authManager *coreauth.Manager) *B
 	return &BaseAPIHandler{
 		Cfg:         cfg,
 		AuthManager: authManager,
+		PromptQueue: promptqueue.GetDefaultManager(),
 	}
 }
 
@@ -463,23 +469,36 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 		SourceFormat:    sdktranslator.FromString(handlerType),
 	}
 	opts.Metadata = reqMeta
-	resp, err := h.AuthManager.Execute(ctx, providers, req, opts)
-	if err != nil {
-		status := http.StatusInternalServerError
-		if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
-			if code := se.StatusCode(); code > 0 {
-				status = code
-			}
-		}
-		var addon http.Header
-		if he, ok := err.(interface{ Headers() http.Header }); ok && he != nil {
-			if hdr := he.Headers(); hdr != nil {
-				addon = hdr.Clone()
-			}
-		}
-		return nil, &interfaces.ErrorMessage{StatusCode: status, Error: err, Addon: addon}
+	var (
+		respPayload []byte
+		execErr     error
+	)
+	queueReq := promptqueue.SubmitRequest{
+		SessionKey: queueSessionKey(providers, normalizedModel, reqMeta),
+		Handler:    handlerType,
+		Model:      normalizedModel,
+		RequestID:  logging.GetRequestID(ctx),
 	}
-	return resp.Payload, nil
+	_, submitErr := h.PromptQueue.SubmitAndWait(queueReq, func(submissionID string) error {
+		reqMetaForRun := cloneMetadata(reqMeta)
+		reqMetaForRun[submissionIDMetadataKey] = submissionID
+		req.Metadata = reqMetaForRun
+		opts.Metadata = reqMetaForRun
+		resp, err := h.AuthManager.Execute(ctx, providers, req, opts)
+		if err != nil {
+			execErr = err
+			return err
+		}
+		respPayload = cloneBytes(resp.Payload)
+		return nil
+	})
+	if execErr != nil {
+		return nil, toErrorMessage(execErr)
+	}
+	if submitErr != nil {
+		return nil, toErrorMessage(submitErr)
+	}
+	return respPayload, nil
 }
 
 // ExecuteCountWithAuthManager executes a non-streaming request via the core auth manager.
@@ -561,33 +580,13 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 		SourceFormat:    sdktranslator.FromString(handlerType),
 	}
 	opts.Metadata = reqMeta
-	chunks, err := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
-	if err != nil {
-		errChan := make(chan *interfaces.ErrorMessage, 1)
-		status := http.StatusInternalServerError
-		if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
-			if code := se.StatusCode(); code > 0 {
-				status = code
-			}
-		}
-		var addon http.Header
-		if he, ok := err.(interface{ Headers() http.Header }); ok && he != nil {
-			if hdr := he.Headers(); hdr != nil {
-				addon = hdr.Clone()
-			}
-		}
-		errChan <- &interfaces.ErrorMessage{StatusCode: status, Error: err, Addon: addon}
-		close(errChan)
-		return nil, errChan
-	}
+
 	dataChan := make(chan []byte)
 	errChan := make(chan *interfaces.ErrorMessage, 1)
+
 	go func() {
 		defer close(dataChan)
 		defer close(errChan)
-		sentPayload := false
-		bootstrapRetries := 0
-		maxBootstrapRetries := StreamingBootstrapRetries(h.Cfg)
 
 		sendErr := func(msg *interfaces.ErrorMessage) bool {
 			if ctx == nil {
@@ -615,77 +614,96 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 			}
 		}
 
-		bootstrapEligible := func(err error) bool {
-			status := statusFromError(err)
-			if status == 0 {
-				return true
-			}
-			switch status {
-			case http.StatusUnauthorized, http.StatusForbidden, http.StatusPaymentRequired,
-				http.StatusRequestTimeout, http.StatusTooManyRequests:
-				return true
-			default:
-				return status >= http.StatusInternalServerError
-			}
+		var streamErr error
+		queueReq := promptqueue.SubmitRequest{
+			SessionKey: queueSessionKey(providers, normalizedModel, reqMeta),
+			Handler:    handlerType,
+			Model:      normalizedModel,
+			RequestID:  logging.GetRequestID(ctx),
 		}
 
-	outer:
-		for {
-			for {
-				var chunk coreexecutor.StreamChunk
-				var ok bool
-				if ctx != nil {
-					select {
-					case <-ctx.Done():
-						return
-					case chunk, ok = <-chunks:
-					}
-				} else {
-					chunk, ok = <-chunks
-				}
-				if !ok {
-					return
-				}
-				if chunk.Err != nil {
-					streamErr := chunk.Err
-					// Safe bootstrap recovery: if the upstream fails before any payload bytes are sent,
-					// retry a few times (to allow auth rotation / transient recovery) and then attempt model fallback.
-					if !sentPayload {
-						if bootstrapRetries < maxBootstrapRetries && bootstrapEligible(streamErr) {
-							bootstrapRetries++
-							retryChunks, retryErr := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
-							if retryErr == nil {
-								chunks = retryChunks
-								continue outer
-							}
-							streamErr = retryErr
-						}
-					}
+		_, submitErr := h.PromptQueue.SubmitAndWait(queueReq, func(submissionID string) error {
+			reqMetaForRun := cloneMetadata(reqMeta)
+			reqMetaForRun[submissionIDMetadataKey] = submissionID
+			req.Metadata = reqMetaForRun
+			opts.Metadata = reqMetaForRun
 
-					status := http.StatusInternalServerError
-					if se, ok := streamErr.(interface{ StatusCode() int }); ok && se != nil {
-						if code := se.StatusCode(); code > 0 {
-							status = code
-						}
-					}
-					var addon http.Header
-					if he, ok := streamErr.(interface{ Headers() http.Header }); ok && he != nil {
-						if hdr := he.Headers(); hdr != nil {
-							addon = hdr.Clone()
-						}
-					}
-					_ = sendErr(&interfaces.ErrorMessage{StatusCode: status, Error: streamErr, Addon: addon})
-					return
+			chunks, err := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
+			if err != nil {
+				streamErr = err
+				return err
+			}
+
+			sentPayload := false
+			bootstrapRetries := 0
+			maxBootstrapRetries := StreamingBootstrapRetries(h.Cfg)
+
+			bootstrapEligible := func(err error) bool {
+				status := statusFromError(err)
+				if status == 0 {
+					return true
 				}
-				if len(chunk.Payload) > 0 {
-					sentPayload = true
-					if okSendData := sendData(cloneBytes(chunk.Payload)); !okSendData {
-						return
+				switch status {
+				case http.StatusUnauthorized, http.StatusForbidden, http.StatusPaymentRequired,
+					http.StatusRequestTimeout, http.StatusTooManyRequests:
+					return true
+				default:
+					return status >= http.StatusInternalServerError
+				}
+			}
+
+		outer:
+			for {
+				for {
+					var chunk coreexecutor.StreamChunk
+					var ok bool
+					if ctx != nil {
+						select {
+						case <-ctx.Done():
+							return context.Canceled
+						case chunk, ok = <-chunks:
+						}
+					} else {
+						chunk, ok = <-chunks
+					}
+					if !ok {
+						return nil
+					}
+					if chunk.Err != nil {
+						streamErr = chunk.Err
+						if !sentPayload {
+							if bootstrapRetries < maxBootstrapRetries && bootstrapEligible(streamErr) {
+								bootstrapRetries++
+								retryChunks, retryErr := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
+								if retryErr == nil {
+									streamErr = nil
+									chunks = retryChunks
+									continue outer
+								}
+								streamErr = retryErr
+							}
+						}
+						return streamErr
+					}
+					if len(chunk.Payload) > 0 {
+						sentPayload = true
+						if okSendData := sendData(cloneBytes(chunk.Payload)); !okSendData {
+							return context.Canceled
+						}
 					}
 				}
 			}
+		})
+
+		if streamErr != nil {
+			_ = sendErr(toErrorMessage(streamErr))
+			return
+		}
+		if submitErr != nil {
+			_ = sendErr(toErrorMessage(submitErr))
 		}
 	}()
+
 	return dataChan, errChan
 }
 
@@ -699,6 +717,62 @@ func statusFromError(err error) int {
 		}
 	}
 	return 0
+}
+
+func toErrorMessage(err error) *interfaces.ErrorMessage {
+	if err == nil {
+		return nil
+	}
+	status := http.StatusInternalServerError
+	if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
+		if code := se.StatusCode(); code > 0 {
+			status = code
+		}
+	}
+	var addon http.Header
+	if he, ok := err.(interface{ Headers() http.Header }); ok && he != nil {
+		if hdr := he.Headers(); hdr != nil {
+			addon = hdr.Clone()
+		}
+	}
+	return &interfaces.ErrorMessage{StatusCode: status, Error: err, Addon: addon}
+}
+
+func cloneMetadata(meta map[string]any) map[string]any {
+	if len(meta) == 0 {
+		return map[string]any{}
+	}
+	out := make(map[string]any, len(meta))
+	for key, value := range meta {
+		out[key] = value
+	}
+	return out
+}
+
+func queueSessionKey(providers []string, model string, reqMeta map[string]any) string {
+	if len(reqMeta) > 0 {
+		raw, ok := reqMeta[coreexecutor.SessionAffinityKeyMetadataKey]
+		if ok && raw != nil {
+			if key, ok := raw.(string); ok {
+				key = strings.TrimSpace(key)
+				if key != "" {
+					return key
+				}
+			}
+		}
+	}
+	providerKey := "unknown"
+	if len(providers) > 0 {
+		candidate := strings.TrimSpace(providers[0])
+		if candidate != "" {
+			providerKey = candidate
+		}
+	}
+	modelKey := strings.TrimSpace(model)
+	if modelKey == "" {
+		modelKey = "unknown"
+	}
+	return providerKey + "|" + modelKey
 }
 
 func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string, normalizedModel string, err *interfaces.ErrorMessage) {

@@ -30,3 +30,9 @@ The SDK service exposes a watcher integration that surfaces granular auth update
 4. Provide a reload callback that handles configuration updates; auth deltas will arrive via the queue and are applied by the service automatically through `handleAuthUpdate`.
 
 Following this flow keeps auth changes responsive while avoiding full reloads for every edit.
+
+## Test Observability Notes
+
+- `TestLoadFileClientsWalkError` intentionally exercises a permission-denied path by `chmod 000` on a temp directory.
+- Some filesystems/environments do not support this operation. In those cases the test logs a structured skip message with `GOOS/GOARCH`.
+- The skip is expected and should be treated as "platform capability unavailable", not as a functional regression.

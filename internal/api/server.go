@@ -481,6 +481,11 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.POST("/usage/import", s.mgmt.ImportUsageStatistics)
 		mgmt.GET("/usage/stream", s.mgmt.StreamUsageEvents)  // SSE real-time events
 		mgmt.GET("/usage/history", s.mgmt.GetRequestHistory) // Request history with pagination
+		mgmt.GET("/usage/events", s.mgmt.GetUsageEvents)
+		mgmt.GET("/prompt-queue/metrics", s.mgmt.GetPromptQueueMetrics)
+		mgmt.GET("/prompt-queue/submissions", s.mgmt.GetPromptQueueSubmissions)
+		mgmt.GET("/prompt-queue/events", s.mgmt.GetPromptQueueEvents)
+		mgmt.GET("/queue-health", s.mgmt.GetQueueHealth)
 		mgmt.GET("/egress-mapping", s.mgmt.GetEgressMapping)
 		mgmt.GET("/config", s.mgmt.GetConfig)
 		mgmt.GET("/config.yaml", s.mgmt.GetConfigYAML)

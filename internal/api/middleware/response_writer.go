@@ -12,6 +12,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/queuehealth"
 )
 
 // RequestInfo holds essential details of an incoming HTTP request for logging purposes.
@@ -84,6 +85,7 @@ func (w *ResponseWriterWrapper) Write(data []byte) (int, error) {
 		select {
 		case w.chunkChannel <- append([]byte(nil), data...): // Non-blocking send with copy
 		default: // Channel full, skip logging to avoid blocking
+			queuehealth.Inc("response_writer_chunk_channel_full")
 		}
 		return n, err
 	}
@@ -131,6 +133,7 @@ func (w *ResponseWriterWrapper) WriteString(data string) (int, error) {
 		select {
 		case w.chunkChannel <- []byte(data):
 		default:
+			queuehealth.Inc("response_writer_chunk_channel_full")
 		}
 		return n, err
 	}

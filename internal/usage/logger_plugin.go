@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 )
 
@@ -90,6 +91,7 @@ type modelStats struct {
 // RequestDetail stores the timestamp and token usage for a single request.
 type RequestDetail struct {
 	Timestamp time.Time  `json:"timestamp"`
+	RequestID string     `json:"request_id,omitempty"`
 	Source    string     `json:"source"`
 	AuthIndex string     `json:"auth_index"`
 	Tokens    TokenStats `json:"tokens"`
@@ -198,6 +200,7 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 	}
 	s.updateAPIStats(stats, modelName, RequestDetail{
 		Timestamp: timestamp,
+		RequestID: resolveRequestID(ctx),
 		Source:    record.Source,
 		AuthIndex: record.AuthIndex,
 		Tokens:    detail,
@@ -379,10 +382,11 @@ func dedupKey(apiName, modelName string, detail RequestDetail) string {
 	timestamp := detail.Timestamp.UTC().Format(time.RFC3339Nano)
 	tokens := normaliseTokenStats(detail.Tokens)
 	return fmt.Sprintf(
-		"%s|%s|%s|%s|%s|%t|%d|%d|%d|%d|%d",
+		"%s|%s|%s|%s|%s|%s|%t|%d|%d|%d|%d|%d",
 		apiName,
 		modelName,
 		timestamp,
+		detail.RequestID,
 		detail.Source,
 		detail.AuthIndex,
 		detail.Failed,
@@ -417,6 +421,10 @@ func resolveAPIIdentifier(ctx context.Context, record coreusage.Record) string {
 		return record.Provider
 	}
 	return "unknown"
+}
+
+func resolveRequestID(ctx context.Context) string {
+	return strings.TrimSpace(logging.GetRequestID(ctx))
 }
 
 func resolveSuccess(ctx context.Context) bool {

@@ -31,6 +31,14 @@ func (a *ClaudeAuthenticator) Provider() string {
 	return "claude"
 }
 
+func validateClaudeOAuthState(expectedState string, receivedState string) error {
+	if receivedState == expectedState {
+		return nil
+	}
+	log.Error("Claude OAuth callback state mismatch")
+	return claude.NewAuthenticationError(claude.ErrInvalidState, fmt.Errorf("state mismatch"))
+}
+
 func (a *ClaudeAuthenticator) RefreshLead() *time.Duration {
 	return new(4 * time.Hour)
 }
@@ -174,13 +182,11 @@ waitForCallback:
 		return nil, claude.NewOAuthError(result.Error, manualDescription, http.StatusBadRequest)
 	}
 
-	if result.State != state {
-		log.Errorf("State mismatch: expected %s, got %s", state, result.State)
-		return nil, claude.NewAuthenticationError(claude.ErrInvalidState, fmt.Errorf("state mismatch"))
+	if err = validateClaudeOAuthState(state, result.State); err != nil {
+		return nil, err
 	}
 
-	log.Debug("Claude authorization code received; exchanging for tokens")
-	log.Debugf("Code: %s, State: %s", result.Code[:min(20, len(result.Code))], state)
+	log.Debug("Claude OAuth authorization callback received; exchanging for tokens")
 
 	authBundle, err := authSvc.ExchangeCodeForTokens(ctx, result.Code, state, pkceCodes)
 	if err != nil {

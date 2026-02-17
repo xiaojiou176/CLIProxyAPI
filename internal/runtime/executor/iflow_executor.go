@@ -17,7 +17,6 @@ import (
 	iflowauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/iflow"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
@@ -414,9 +413,9 @@ func (e *IFlowExecutor) refreshOAuthBased(ctx context.Context, auth *cliproxyaut
 		return auth, nil
 	}
 
-	// Log the old access token (masked) before refresh
+	// Log the old access token before refresh.
 	if oldAccessToken != "" {
-		log.Debugf("iflow executor: refreshing access token, old: %s", util.HideAPIKey(oldAccessToken))
+		log.Debugf("iflow executor: refreshing access token, old: %s", oldAccessToken)
 	}
 
 	svc := iflowauth.NewIFlowAuth(e.cfg)
@@ -440,8 +439,8 @@ func (e *IFlowExecutor) refreshOAuthBased(ctx context.Context, auth *cliproxyaut
 	auth.Metadata["type"] = "iflow"
 	auth.Metadata["last_refresh"] = time.Now().Format(time.RFC3339)
 
-	// Log the new access token (masked) after successful refresh
-	log.Debugf("iflow executor: token refresh successful, new: %s", util.HideAPIKey(tokenData.AccessToken))
+	// Log the new access token after successful refresh.
+	log.Debugf("iflow executor: token refresh successful, new: %s", tokenData.AccessToken)
 
 	if auth.Attributes == nil {
 		auth.Attributes = make(map[string]string)

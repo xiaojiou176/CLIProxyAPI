@@ -5,15 +5,21 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/queuehealth"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
 )
 
 // RequestEvent represents a single request event for SSE streaming.
 type RequestEvent struct {
-	Type      string    `json:"type"`      // "request" | "quota_exceeded" | "error"
+	Type      string    `json:"type"` // "request" | "quota_exceeded" | "error"
+	Seq       int64     `json:"seq,omitempty"`
+	EventID   string    `json:"event_id,omitempty"`
 	Timestamp time.Time `json:"timestamp"`
 	RequestID string    `json:"request_id,omitempty"`
 	Provider  string    `json:"provider"`
@@ -29,11 +35,30 @@ type RequestEvent struct {
 // EventStreamManager manages SSE subscribers for real-time usage events.
 type EventStreamManager struct {
 	mu          sync.RWMutex
-	subscribers map[string]chan RequestEvent
+	subscribers map[string]*eventSubscriber
 	nextID      int64
+	nextSeq     int64
+	ledger      []RequestEvent
+	maxLedger   int
+	published   int64
+	dropped     int64
 }
 
 var defaultEventStream = NewEventStreamManager()
+
+type eventSubscriber struct {
+	events  chan RequestEvent
+	dropped int64
+}
+
+type EventStreamMetrics struct {
+	PublishedTotal  int64            `json:"published_total"`
+	DroppedTotal    int64            `json:"dropped_total"`
+	SubscriberCount int              `json:"subscriber_count"`
+	LedgerSize      int              `json:"ledger_size"`
+	SubscriberDrop  map[string]int64 `json:"subscriber_dropped_total"`
+	CurrentSeq      int64            `json:"current_seq"`
+}
 
 // GetEventStream returns the shared event stream manager.
 func GetEventStream() *EventStreamManager { return defaultEventStream }
@@ -41,7 +66,9 @@ func GetEventStream() *EventStreamManager { return defaultEventStream }
 // NewEventStreamManager creates a new event stream manager.
 func NewEventStreamManager() *EventStreamManager {
 	return &EventStreamManager{
-		subscribers: make(map[string]chan RequestEvent),
+		subscribers: make(map[string]*eventSubscriber),
+		maxLedger:   10000,
+		ledger:      make([]RequestEvent, 0, 1024),
 	}
 }
 
@@ -53,8 +80,8 @@ func (m *EventStreamManager) Subscribe() (id string, events <-chan RequestEvent)
 
 	m.nextID++
 	id = fmt.Sprintf("sub-%d", m.nextID)
-	ch := make(chan RequestEvent, 100) // Buffer to avoid blocking
-	m.subscribers[id] = ch
+	ch := make(chan RequestEvent, 256) // Slightly larger buffer for burst replay/live overlap.
+	m.subscribers[id] = &eventSubscriber{events: ch}
 	return id, ch
 }
 
@@ -63,22 +90,41 @@ func (m *EventStreamManager) Unsubscribe(id string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if ch, ok := m.subscribers[id]; ok {
-		close(ch)
+	if subscriber, ok := m.subscribers[id]; ok && subscriber != nil {
+		close(subscriber.events)
 		delete(m.subscribers, id)
 	}
 }
 
 // Publish broadcasts an event to all subscribers.
 func (m *EventStreamManager) Publish(event RequestEvent) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
+	m.mu.Lock()
+	defer m.mu.Unlock()
 
-	for _, ch := range m.subscribers {
+	m.nextSeq++
+	event.Seq = m.nextSeq
+	if strings.TrimSpace(event.EventID) == "" {
+		event.EventID = strconv.FormatInt(event.Seq, 10)
+	}
+	if event.Timestamp.IsZero() {
+		event.Timestamp = time.Now().UTC()
+	}
+	m.published++
+	m.ledger = append(m.ledger, event)
+	if len(m.ledger) > m.maxLedger {
+		m.ledger = append([]RequestEvent(nil), m.ledger[len(m.ledger)-m.maxLedger:]...)
+	}
+
+	for _, subscriber := range m.subscribers {
+		if subscriber == nil {
+			continue
+		}
 		select {
-		case ch <- event:
+		case subscriber.events <- event:
 		default:
-			// Drop event if subscriber is slow
+			subscriber.dropped++
+			m.dropped++
+			queuehealth.Inc("usage_subscriber_channel_full")
 		}
 	}
 }
@@ -88,6 +134,52 @@ func (m *EventStreamManager) SubscriberCount() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return len(m.subscribers)
+}
+
+func (m *EventStreamManager) CurrentSeq() int64 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.nextSeq
+}
+
+func (m *EventStreamManager) ReplaySince(sinceSeq int64, limit int) []RequestEvent {
+	if limit <= 0 {
+		limit = 500
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make([]RequestEvent, 0, limit)
+	for i := 0; i < len(m.ledger); i++ {
+		event := m.ledger[i]
+		if event.Seq <= sinceSeq {
+			continue
+		}
+		out = append(out, event)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out
+}
+
+func (m *EventStreamManager) MetricsSnapshot() EventStreamMetrics {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	snap := EventStreamMetrics{
+		PublishedTotal:  m.published,
+		DroppedTotal:    m.dropped,
+		SubscriberCount: len(m.subscribers),
+		LedgerSize:      len(m.ledger),
+		SubscriberDrop:  make(map[string]int64, len(m.subscribers)),
+		CurrentSeq:      m.nextSeq,
+	}
+	for id, subscriber := range m.subscribers {
+		if subscriber == nil {
+			continue
+		}
+		snap.SubscriberDrop[id] = subscriber.dropped
+	}
+	return snap
 }
 
 // EventStreamPlugin implements coreusage.Plugin to broadcast usage events.
@@ -105,13 +197,11 @@ func (p *EventStreamPlugin) HandleUsage(ctx context.Context, record coreusage.Re
 	if p == nil || p.manager == nil {
 		return
 	}
-	if p.manager.SubscriberCount() == 0 {
-		return // No subscribers, skip processing
-	}
 
 	event := RequestEvent{
 		Type:      "request",
 		Timestamp: record.RequestedAt,
+		RequestID: strings.TrimSpace(logging.GetRequestID(ctx)),
 		Provider:  record.Provider,
 		Model:     record.Model,
 		AuthFile:  record.AuthIndex,
@@ -159,6 +249,9 @@ func PublishError(provider, model, authFile, errorMsg string) {
 // EventToSSE formats an event as SSE data.
 func EventToSSE(event RequestEvent) []byte {
 	data, _ := json.Marshal(event)
+	if event.Seq > 0 {
+		return []byte(fmt.Sprintf("id: %d\ndata: %s\n\n", event.Seq, data))
+	}
 	return []byte(fmt.Sprintf("data: %s\n\n", data))
 }
 

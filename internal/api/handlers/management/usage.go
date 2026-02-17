@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -106,29 +107,125 @@ func (h *Handler) StreamUsageEvents(c *gin.Context) {
 
 	log.WithField("subscriber_id", subID).Info("SSE client connected for usage events")
 
+	sinceSeq := parseSinceSeq(c)
+
 	// Send initial connection event
 	initialEvent := usage.RequestEvent{
 		Type:      "connected",
 		Timestamp: time.Now(),
+		Seq:       eventStream.CurrentSeq(),
 	}
 	c.Writer.Write(usage.EventToSSE(initialEvent))
 	c.Writer.Flush()
 
+	lastSeq := sinceSeq
+	if sinceSeq > 0 {
+		replay := eventStream.ReplaySince(sinceSeq, 2000)
+		for i := 0; i < len(replay); i++ {
+			event := replay[i]
+			if event.Seq > lastSeq {
+				lastSeq = event.Seq
+			}
+			c.Writer.Write(usage.EventToSSE(event))
+		}
+		c.Writer.Flush()
+	}
+
 	// Stream events
 	clientGone := c.Request.Context().Done()
+	heartbeatTicker := time.NewTicker(20 * time.Second)
+	defer heartbeatTicker.Stop()
 	for {
 		select {
 		case <-clientGone:
 			log.WithField("subscriber_id", subID).Info("SSE client disconnected")
 			return
+		case <-heartbeatTicker.C:
+			heartbeat := usage.RequestEvent{
+				Type:      "heartbeat",
+				Timestamp: time.Now().UTC(),
+			}
+			c.Writer.Write(usage.EventToSSE(heartbeat))
+			c.Writer.Flush()
 		case event, ok := <-events:
 			if !ok {
 				return // Channel closed
 			}
+			if event.Seq > lastSeq+1 {
+				missing := eventStream.ReplaySince(lastSeq, 2000)
+				replayedAny := false
+				for i := 0; i < len(missing); i++ {
+					candidate := missing[i]
+					if candidate.Seq <= lastSeq {
+						continue
+					}
+					if candidate.Seq >= event.Seq {
+						break
+					}
+					c.Writer.Write(usage.EventToSSE(candidate))
+					lastSeq = candidate.Seq
+					replayedAny = true
+				}
+				if !replayedAny {
+					gapEvent := usage.RequestEvent{
+						Type:      "replay_gap",
+						Timestamp: time.Now().UTC(),
+						Provider:  "",
+						Model:     "",
+						AuthFile:  "",
+						Success:   false,
+						Error:     fmt.Sprintf("missing seq range [%d,%d]", lastSeq+1, event.Seq-1),
+					}
+					c.Writer.Write(usage.EventToSSE(gapEvent))
+				}
+			}
 			c.Writer.Write(usage.EventToSSE(event))
+			if event.Seq > lastSeq {
+				lastSeq = event.Seq
+			}
 			c.Writer.Flush()
 		}
 	}
+}
+
+func (h *Handler) GetUsageEvents(c *gin.Context) {
+	eventStream := usage.GetEventStream()
+	if eventStream == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "event stream not available"})
+		return
+	}
+	sinceSeq := parseSinceSeq(c)
+	limit := 500
+	if raw := c.Query("limit"); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
+			if parsed > 5000 {
+				parsed = 5000
+			}
+			limit = parsed
+		}
+	}
+	events := eventStream.ReplaySince(sinceSeq, limit)
+	c.JSON(http.StatusOK, gin.H{
+		"events":  events,
+		"metrics": eventStream.MetricsSnapshot(),
+	})
+}
+
+func parseSinceSeq(c *gin.Context) int64 {
+	if c == nil {
+		return 0
+	}
+	if raw := c.Query("since_seq"); raw != "" {
+		if parsed, err := strconv.ParseInt(raw, 10, 64); err == nil && parsed >= 0 {
+			return parsed
+		}
+	}
+	if raw := c.GetHeader("Last-Event-ID"); raw != "" {
+		if parsed, err := strconv.ParseInt(raw, 10, 64); err == nil && parsed >= 0 {
+			return parsed
+		}
+	}
+	return 0
 }
 
 // GetRequestHistory returns recent request details with pagination.
@@ -167,6 +264,9 @@ func (h *Handler) GetRequestHistory(c *gin.Context) {
 	filterModel := c.Query("model")
 	filterProvider := c.Query("provider")
 	filterSuccess := c.Query("success")
+	filterRequestID := c.Query("request_id")
+	filterAuthIndex := c.Query("auth_index")
+	filterSource := c.Query("source")
 
 	snapshot := h.usageStats.Snapshot()
 
@@ -188,9 +288,19 @@ func (h *Handler) GetRequestHistory(c *gin.Context) {
 						continue
 					}
 				}
+				if filterRequestID != "" && detail.RequestID != filterRequestID {
+					continue
+				}
+				if filterAuthIndex != "" && detail.AuthIndex != filterAuthIndex {
+					continue
+				}
+				if filterSource != "" && detail.Source != filterSource {
+					continue
+				}
 
 				allRequests = append(allRequests, RequestHistoryItem{
 					Timestamp: detail.Timestamp,
+					RequestID: detail.RequestID,
 					APIKey:    apiKey,
 					Model:     modelName,
 					AuthIndex: detail.AuthIndex,
@@ -234,6 +344,7 @@ func matchesProvider(apiKey, provider string) bool {
 // RequestHistoryItem represents a single request in the history
 type RequestHistoryItem struct {
 	Timestamp time.Time `json:"timestamp"`
+	RequestID string    `json:"request_id,omitempty"`
 	APIKey    string    `json:"api_key"`
 	Model     string    `json:"model"`
 	AuthIndex string    `json:"auth_index"`

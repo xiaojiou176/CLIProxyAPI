@@ -12,7 +12,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 )
 
 // RequestLoggingMiddleware creates a Gin middleware that logs HTTP requests and responses.
@@ -68,11 +67,11 @@ func RequestLoggingMiddleware(logger logging.RequestLogger) gin.HandlerFunc {
 // It captures the URL, method, headers, and body. The request body is read and then
 // restored so that it can be processed by subsequent handlers.
 func captureRequestInfo(c *gin.Context) (*RequestInfo, error) {
-	// Capture URL with sensitive query parameters masked
-	maskedQuery := util.MaskSensitiveQuery(c.Request.URL.RawQuery)
+	// Capture URL query in raw form for full-fidelity debugging.
+	rawQuery := c.Request.URL.RawQuery
 	url := c.Request.URL.Path
-	if maskedQuery != "" {
-		url += "?" + maskedQuery
+	if rawQuery != "" {
+		url += "?" + rawQuery
 	}
 
 	// Capture method
