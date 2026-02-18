@@ -28,6 +28,8 @@ type OpenAIResponsesAPIHandler struct {
 	*handlers.BaseAPIHandler
 }
 
+const upstreamResponseHeadersContextKey = "UPSTREAM_RESPONSE_HEADERS"
+
 // NewOpenAIResponsesAPIHandler creates a new OpenAIResponses API handlers instance.
 // It takes an BaseAPIHandler instance as input and returns an OpenAIResponsesAPIHandler.
 //
@@ -132,6 +134,7 @@ func (h *OpenAIResponsesAPIHandler) Compact(c *gin.Context) {
 		cliCancel(errMsg.Error)
 		return
 	}
+	applyUpstreamModelHeaders(c)
 	_, _ = c.Writer.Write(resp)
 	cliCancel()
 }
@@ -158,6 +161,7 @@ func (h *OpenAIResponsesAPIHandler) handleNonStreamingResponse(c *gin.Context, r
 		return
 	}
 	resp = rewriteSpawnAgentExplorerInNonStreamingResponse(resp)
+	applyUpstreamModelHeaders(c)
 	_, _ = c.Writer.Write(resp)
 	cliCancel()
 }
@@ -192,6 +196,7 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 		c.Header("Cache-Control", "no-cache")
 		c.Header("Connection", "keep-alive")
 		c.Header("Access-Control-Allow-Origin", "*")
+		applyUpstreamModelHeaders(c)
 	}
 
 	// Peek at the first chunk
@@ -301,6 +306,47 @@ func rewriteSpawnAgentExplorerChunk(chunk []byte) []byte {
 		return chunk
 	}
 	return []byte(strings.Join(lines, "\n"))
+}
+
+func applyUpstreamModelHeaders(c *gin.Context) {
+	if c == nil {
+		return
+	}
+	raw, exists := c.Get(upstreamResponseHeadersContextKey)
+	if !exists {
+		return
+	}
+	headers, ok := raw.(http.Header)
+	if !ok || headers == nil {
+		return
+	}
+	model := firstHeaderValueCaseInsensitive(headers, "openai-model", "x-openai-model")
+	if model == "" {
+		return
+	}
+	c.Header("openai-model", model)
+	c.Header("x-openai-model", model)
+}
+
+func firstHeaderValueCaseInsensitive(headers http.Header, keys ...string) string {
+	if headers == nil {
+		return ""
+	}
+	for _, key := range keys {
+		if v := strings.TrimSpace(headers.Get(key)); v != "" {
+			return v
+		}
+		lowerKey := strings.ToLower(key)
+		for existingKey, values := range headers {
+			if strings.ToLower(existingKey) != lowerKey || len(values) == 0 {
+				continue
+			}
+			if v := strings.TrimSpace(values[0]); v != "" {
+				return v
+			}
+		}
+	}
+	return ""
 }
 
 func rewriteSpawnAgentExplorerPayload(payload string) (string, bool) {

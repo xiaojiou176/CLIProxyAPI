@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
 	"github.com/tidwall/gjson"
 )
 
@@ -161,4 +162,31 @@ func TestCodexStreamFailure(t *testing.T) {
 			t.Fatalf("expected non failure event to be ignored")
 		}
 	})
+}
+
+func TestResolveCodexClientVersionPrefersAuthAttribute(t *testing.T) {
+	t.Setenv("CODEX_CLI_VERSION", "0.999.0")
+	auth := &cliproxyauth.Auth{
+		Attributes: map[string]string{
+			"codex_client_version": "0.103.0",
+		},
+	}
+
+	if got := resolveCodexClientVersion(auth); got != "0.103.0" {
+		t.Fatalf("resolveCodexClientVersion(auth)=%q, want %q", got, "0.103.0")
+	}
+}
+
+func TestResolveCodexClientVersionUsesEnvFallback(t *testing.T) {
+	t.Setenv("CODEX_CLI_VERSION", "0.104.1")
+	if got := resolveCodexClientVersion(nil); got != "0.104.1" {
+		t.Fatalf("resolveCodexClientVersion(nil)=%q, want %q", got, "0.104.1")
+	}
+}
+
+func TestResolveCodexUserAgentFallback(t *testing.T) {
+	t.Setenv("CODEX_CLI_VERSION", "0.200.0")
+	if got := resolveCodexUserAgent(nil); got != "codex_cli_rs/0.200.0" {
+		t.Fatalf("resolveCodexUserAgent(nil)=%q, want %q", got, "codex_cli_rs/0.200.0")
+	}
 }

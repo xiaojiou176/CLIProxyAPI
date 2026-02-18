@@ -112,6 +112,16 @@ CLIProxyAPI includes integrated support for [Amp CLI](https://ampcode.com) and A
 - Local gate: `./scripts/doc-ci-gate.sh`
 - CI gate: `.github/workflows/doc-governance.yml`
 
+## Compatibility Notes (2026-02-18)
+
+- Codex executor request headers are no longer pinned to a fixed `0.101.0` version string.
+  - Version priority: `auth.attributes.codex_client_version` -> `CODEX_CLI_VERSION` -> `dev`.
+  - User-Agent can be overridden by `auth.attributes.user_agent`.
+- Codex upstream response headers are now captured in execution context and OpenAI Responses handlers propagate `openai-model` / `x-openai-model` when present.
+- Related regression tests were added under:
+  - `internal/runtime/executor/codex_executor_test.go`
+  - `sdk/api/handlers/openai/openai_responses_compact_test.go`
+
 ## Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.

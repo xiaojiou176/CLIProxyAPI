@@ -20,6 +20,7 @@ type compactCaptureExecutor struct {
 	alt          string
 	sourceFormat string
 	calls        int
+	modelHeader  string
 }
 
 func (e *compactCaptureExecutor) Identifier() string { return "test-provider" }
@@ -28,6 +29,11 @@ func (e *compactCaptureExecutor) Execute(ctx context.Context, auth *coreauth.Aut
 	e.calls++
 	e.alt = opts.Alt
 	e.sourceFormat = opts.SourceFormat.String()
+	if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && e.modelHeader != "" {
+		ginCtx.Set(upstreamResponseHeadersContextKey, http.Header{
+			"openai-model": []string{e.modelHeader},
+		})
+	}
 	return coreexecutor.Response{Payload: []byte(`{"ok":true}`)}, nil
 }
 
@@ -116,5 +122,95 @@ func TestOpenAIResponsesCompactExecute(t *testing.T) {
 	}
 	if strings.TrimSpace(resp.Body.String()) != `{"ok":true}` {
 		t.Fatalf("body = %s", resp.Body.String())
+	}
+}
+
+func TestOpenAIResponsesCompactPropagatesOpenAIModelHeader(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	executor := &compactCaptureExecutor{modelHeader: "gpt-5.3-codex-high"}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+
+	auth := &coreauth.Auth{ID: "auth3", Provider: executor.Identifier(), Status: coreauth.StatusActive}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "test-model"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	h := NewOpenAIResponsesAPIHandler(base)
+	router := gin.New()
+	router.POST("/v1/responses/compact", h.Compact)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses/compact", strings.NewReader(`{"model":"test-model","input":"hello"}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.Code, http.StatusOK)
+	}
+	if got := resp.Header().Get("openai-model"); got != "gpt-5.3-codex-high" {
+		t.Fatalf("openai-model = %q, want %q", got, "gpt-5.3-codex-high")
+	}
+	if got := resp.Header().Get("x-openai-model"); got != "gpt-5.3-codex-high" {
+		t.Fatalf("x-openai-model = %q, want %q", got, "gpt-5.3-codex-high")
+	}
+}
+
+func TestOpenAIResponsesNonStreamingPropagatesOpenAIModelHeader(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	executor := &compactCaptureExecutor{modelHeader: "gpt-5.3-codex-low"}
+	manager := coreauth.NewManager(nil, nil, nil)
+	manager.RegisterExecutor(executor)
+
+	auth := &coreauth.Auth{ID: "auth4", Provider: executor.Identifier(), Status: coreauth.StatusActive}
+	if _, err := manager.Register(context.Background(), auth); err != nil {
+		t.Fatalf("Register auth: %v", err)
+	}
+	registry.GetGlobalRegistry().RegisterClient(auth.ID, auth.Provider, []*registry.ModelInfo{{ID: "test-model"}})
+	t.Cleanup(func() {
+		registry.GetGlobalRegistry().UnregisterClient(auth.ID)
+	})
+
+	base := handlers.NewBaseAPIHandlers(&sdkconfig.SDKConfig{}, manager)
+	h := NewOpenAIResponsesAPIHandler(base)
+	router := gin.New()
+	router.POST("/v1/responses", h.Responses)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"test-model","input":"hello"}`))
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	router.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.Code, http.StatusOK)
+	}
+	if got := resp.Header().Get("openai-model"); got != "gpt-5.3-codex-low" {
+		t.Fatalf("openai-model = %q, want %q", got, "gpt-5.3-codex-low")
+	}
+	if got := resp.Header().Get("x-openai-model"); got != "gpt-5.3-codex-low" {
+		t.Fatalf("x-openai-model = %q, want %q", got, "gpt-5.3-codex-low")
+	}
+}
+
+func TestApplyUpstreamModelHeadersReadsXOpenAIModel(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Set(upstreamResponseHeadersContextKey, http.Header{
+		"x-openai-model": []string{"gpt-5.3-codex-fallback"},
+	})
+
+	applyUpstreamModelHeaders(ctx)
+
+	if got := ctx.Writer.Header().Get("openai-model"); got != "gpt-5.3-codex-fallback" {
+		t.Fatalf("openai-model = %q, want %q", got, "gpt-5.3-codex-fallback")
+	}
+	if got := ctx.Writer.Header().Get("x-openai-model"); got != "gpt-5.3-codex-fallback" {
+		t.Fatalf("x-openai-model = %q, want %q", got, "gpt-5.3-codex-fallback")
 	}
 }

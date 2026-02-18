@@ -9,6 +9,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -32,8 +33,8 @@ import (
 )
 
 const (
-	codexClientVersion = "0.101.0"
-	codexUserAgent     = "codex_cli_rs/0.101.0 (Mac OS 26.0.1; arm64) Apple_Terminal/464"
+	defaultCodexClientVersion      = "dev"
+	upstreamResponseHeadersContext = "UPSTREAM_RESPONSE_HEADERS"
 )
 
 var dataTag = []byte("data:")
@@ -433,6 +434,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		}
 	}()
 	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	stashUpstreamResponseHeaders(ctx, httpResp.Header)
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		b, _ := io.ReadAll(httpResp.Body)
 		appendAPIResponseChunk(ctx, e.cfg, b)
@@ -562,6 +564,7 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 		}
 	}()
 	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	stashUpstreamResponseHeaders(ctx, httpResp.Header)
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		b, _ := io.ReadAll(httpResp.Body)
 		appendAPIResponseChunk(ctx, e.cfg, b)
@@ -653,6 +656,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		return nil, err
 	}
 	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	stashUpstreamResponseHeaders(ctx, httpResp.Header)
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		data, readErr := io.ReadAll(httpResp.Body)
 		if errClose := httpResp.Body.Close(); errClose != nil {
@@ -993,10 +997,10 @@ func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, s
 		ginHeaders = ginCtx.Request.Header
 	}
 
-	misc.EnsureHeader(r.Header, ginHeaders, "Version", codexClientVersion)
+	misc.EnsureHeader(r.Header, ginHeaders, "Version", resolveCodexClientVersion(auth))
 	misc.EnsureHeader(r.Header, ginHeaders, "Openai-Beta", "responses=experimental")
 	misc.EnsureHeader(r.Header, ginHeaders, "Session_id", uuid.NewString())
-	misc.EnsureHeader(r.Header, ginHeaders, "User-Agent", codexUserAgent)
+	misc.EnsureHeader(r.Header, ginHeaders, "User-Agent", resolveCodexUserAgent(auth))
 
 	if stream {
 		r.Header.Set("Accept", "text/event-stream")
@@ -1024,6 +1028,38 @@ func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, s
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(r, attrs)
+}
+
+func resolveCodexClientVersion(auth *cliproxyauth.Auth) string {
+	if auth != nil && auth.Attributes != nil {
+		if v := strings.TrimSpace(auth.Attributes["codex_client_version"]); v != "" {
+			return v
+		}
+	}
+	if v := strings.TrimSpace(os.Getenv("CODEX_CLI_VERSION")); v != "" {
+		return v
+	}
+	return defaultCodexClientVersion
+}
+
+func resolveCodexUserAgent(auth *cliproxyauth.Auth) string {
+	if auth != nil && auth.Attributes != nil {
+		if v := strings.TrimSpace(auth.Attributes["user_agent"]); v != "" {
+			return v
+		}
+	}
+	return "codex_cli_rs/" + resolveCodexClientVersion(auth)
+}
+
+func stashUpstreamResponseHeaders(ctx context.Context, headers http.Header) {
+	if ctx == nil || headers == nil {
+		return
+	}
+	ginCtx, _ := ctx.Value("gin").(*gin.Context)
+	if ginCtx == nil {
+		return
+	}
+	ginCtx.Set(upstreamResponseHeadersContext, headers.Clone())
 }
 
 func codexCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
