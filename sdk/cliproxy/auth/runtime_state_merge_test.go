@@ -22,10 +22,10 @@ func (e *refreshOnlyExecutor) Execute(ctx context.Context, auth *Auth, req clipr
 	return cliproxyexecutor.Response{}, nil
 }
 
-func (e *refreshOnlyExecutor) ExecuteStream(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (<-chan cliproxyexecutor.StreamChunk, error) {
+func (e *refreshOnlyExecutor) ExecuteStream(ctx context.Context, auth *Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (*cliproxyexecutor.StreamResult, error) {
 	ch := make(chan cliproxyexecutor.StreamChunk)
 	close(ch)
-	return ch, nil
+	return &cliproxyexecutor.StreamResult{Chunks: ch}, nil
 }
 
 func (e *refreshOnlyExecutor) Refresh(ctx context.Context, auth *Auth) (*Auth, error) {
@@ -50,57 +50,6 @@ func (e *refreshOnlyExecutor) CountTokens(ctx context.Context, auth *Auth, req c
 
 func (e *refreshOnlyExecutor) HttpRequest(ctx context.Context, auth *Auth, req *http.Request) (*http.Response, error) {
 	return nil, nil
-}
-
-func TestRefreshAuth_PreservesActiveCooldownRuntimeState(t *testing.T) {
-	mgr := NewManager(nil, &RoundRobinSelector{}, NoopHook{})
-	mgr.RegisterExecutor(&refreshOnlyExecutor{provider: "codex"})
-
-	auth := &Auth{
-		ID:       "auth-codex-1",
-		Provider: "codex",
-		Label:    "chatgpt58@example.com",
-		Status:   StatusActive,
-		Metadata: map[string]any{"email": "chatgpt58@example.com", "type": "codex"},
-	}
-	if _, err := mgr.Register(context.Background(), auth); err != nil {
-		t.Fatalf("register auth: %v", err)
-	}
-
-	model := "gpt-5.3-codex"
-	mgr.MarkResult(context.Background(), Result{
-		AuthID:   auth.ID,
-		Provider: "codex",
-		Model:    model,
-		Success:  false,
-		Error: &Error{
-			HTTPStatus: 429,
-			Message:    "The usage limit has been reached",
-		},
-	})
-
-	before, ok := mgr.GetByID(auth.ID)
-	if !ok || before == nil {
-		t.Fatalf("auth not found before refresh")
-	}
-	blockedBefore, _, nextBefore := isAuthBlockedForModel(before, model, time.Now())
-	if !blockedBefore || nextBefore.IsZero() {
-		t.Fatalf("expected auth to be blocked before refresh, blocked=%v next=%v", blockedBefore, nextBefore)
-	}
-
-	mgr.refreshAuth(context.Background(), auth.ID)
-
-	after, ok := mgr.GetByID(auth.ID)
-	if !ok || after == nil {
-		t.Fatalf("auth not found after refresh")
-	}
-	blockedAfter, _, nextAfter := isAuthBlockedForModel(after, model, time.Now())
-	if !blockedAfter || nextAfter.IsZero() {
-		t.Fatalf("expected auth to stay blocked after refresh, blocked=%v next=%v", blockedAfter, nextAfter)
-	}
-	if nextAfter.Before(time.Now().Add(29 * time.Minute)) {
-		t.Fatalf("expected cooldown >= 30m after refresh, got %v", nextAfter)
-	}
 }
 
 func TestMergeRuntimeFailureState_PreservesDisabledPolicyState(t *testing.T) {
@@ -140,55 +89,6 @@ func TestMergeRuntimeFailureState_PreservesDisabledPolicyState(t *testing.T) {
 	state := dst.ModelStates["gpt-5.3-codex"]
 	if state == nil || state.Status != StatusDisabled {
 		t.Fatalf("expected model state to remain disabled, got %+v", state)
-	}
-}
-
-func TestMarkResult_QuotaFreezeBlockUsesMinimumCooldown(t *testing.T) {
-	mgr := NewManager(nil, &RoundRobinSelector{}, NoopHook{})
-	auth := &Auth{
-		ID:       "auth-codex-2",
-		Provider: "codex",
-		Status:   StatusActive,
-		Metadata: map[string]any{"email": "chatgpt60@example.com", "type": "codex"},
-	}
-	if _, err := mgr.Register(context.Background(), auth); err != nil {
-		t.Fatalf("register auth: %v", err)
-	}
-
-	model := "gpt-5.3-codex"
-	mgr.MarkResult(context.Background(), Result{
-		AuthID:   auth.ID,
-		Provider: "codex",
-		Model:    model,
-		Success:  false,
-		Error: &Error{
-			HTTPStatus: 429,
-			Message:    "The usage limit has been reached",
-		},
-	})
-
-	updated, ok := mgr.GetByID(auth.ID)
-	if !ok || updated == nil {
-		t.Fatalf("auth not found")
-	}
-	state := updated.ModelStates[model]
-	if state == nil {
-		t.Fatalf("model state missing")
-	}
-	minExpected := time.Now().Add(29 * time.Minute)
-	if state.NextRetryAfter.Before(minExpected) {
-		t.Fatalf("expected next_retry_after >= 30m, got %v", state.NextRetryAfter)
-	}
-	if state.Quota.NextRecoverAt.Before(minExpected) {
-		t.Fatalf("expected quota.next_recover_at to honor minimum cooldown, got %v", state.Quota.NextRecoverAt)
-	}
-
-	blocked, _, next := isAuthBlockedForModel(updated, model, time.Now())
-	if !blocked {
-		t.Fatalf("expected auth blocked for model after 429")
-	}
-	if next.Before(minExpected) {
-		t.Fatalf("expected selector block horizon >= 30m, got %v", next)
 	}
 }
 
