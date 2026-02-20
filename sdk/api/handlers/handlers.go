@@ -450,7 +450,7 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 	}
 	providers, normalizedModel, errMsg := h.getRequestDetails(modelName)
 	if errMsg != nil {
-		return nil, errMsg
+		return nil, nil, errMsg
 	}
 	reqMeta := requestExecutionMetadata(ctx, rawJSON)
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
@@ -509,7 +509,7 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 	}
 	providers, normalizedModel, errMsg := h.getRequestDetails(modelName)
 	if errMsg != nil {
-		return nil, errMsg
+		return nil, nil, errMsg
 	}
 	reqMeta := requestExecutionMetadata(ctx, rawJSON)
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
@@ -542,9 +542,12 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 				addon = hdr.Clone()
 			}
 		}
-		return nil, &interfaces.ErrorMessage{StatusCode: status, Error: err, Addon: addon}
+		return nil, nil, &interfaces.ErrorMessage{StatusCode: status, Error: err, Addon: addon}
 	}
-	return resp.Payload, nil
+	if !PassthroughHeadersEnabled(h.Cfg) {
+		return resp.Payload, nil, nil
+	}
+	return resp.Payload, FilterUpstreamHeaders(resp.Headers), nil
 }
 
 // ExecuteStreamWithAuthManager executes a streaming request via the core auth manager.
@@ -561,7 +564,7 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 		errChan := make(chan *interfaces.ErrorMessage, 1)
 		errChan <- errMsg
 		close(errChan)
-		return nil, errChan
+		return nil, nil, errChan
 	}
 	reqMeta := requestExecutionMetadata(ctx, rawJSON)
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
@@ -1268,13 +1271,33 @@ func cloneBytes(src []byte) []byte {
 	return dst
 }
 
+func cloneHeader(src http.Header) http.Header {
+	if src == nil {
+		return nil
+	}
+	dst := make(http.Header, len(src))
+	for key, values := range src {
+		dst[key] = append([]string(nil), values...)
+	}
+	return dst
+}
+
+func replaceHeader(dst http.Header, src http.Header) {
+	for key := range dst {
+		delete(dst, key)
+	}
+	for key, values := range src {
+		dst[key] = append([]string(nil), values...)
+	}
+}
+
 // WriteErrorResponse writes an error message to the response writer using the HTTP status embedded in the message.
 func (h *BaseAPIHandler) WriteErrorResponse(c *gin.Context, msg *interfaces.ErrorMessage) {
 	status := http.StatusInternalServerError
 	if msg != nil && msg.StatusCode > 0 {
 		status = msg.StatusCode
 	}
-	if msg != nil && msg.Addon != nil {
+	if msg != nil && msg.Addon != nil && PassthroughHeadersEnabled(h.Cfg) {
 		for key, values := range msg.Addon {
 			if len(values) == 0 {
 				continue
