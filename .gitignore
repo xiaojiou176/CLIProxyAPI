@@ -1,5 +1,7 @@
 # Binaries
 cli-proxy-api
+CLIProxyAPI
+server
 *.exe
 
 # Configuration
@@ -8,10 +10,13 @@ config.yaml
 
 # Generated content
 bin/*
+build/*
 logs/*
 conv/*
 temp/*
 refs/*
+*.log
+report.json
 
 # Storage backends
 pgstore/*
