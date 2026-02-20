@@ -11,7 +11,6 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"strings"
 
 	"github.com/gin-gonic/gin"
 	. "github.com/router-for-me/CLIProxyAPI/v6/internal/constant"
@@ -27,8 +26,6 @@ import (
 type OpenAIResponsesAPIHandler struct {
 	*handlers.BaseAPIHandler
 }
-
-const upstreamResponseHeadersContextKey = "UPSTREAM_RESPONSE_HEADERS"
 
 // NewOpenAIResponsesAPIHandler creates a new OpenAIResponses API handlers instance.
 // It takes an BaseAPIHandler instance as input and returns an OpenAIResponsesAPIHandler.
@@ -62,7 +59,7 @@ func (h *OpenAIResponsesAPIHandler) Models() []map[string]any {
 func (h *OpenAIResponsesAPIHandler) OpenAIResponsesModels(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"object": "list",
-		"data":   h.FilterVisibleModels(c, h.Models()),
+		"data":   h.Models(),
 	})
 }
 
@@ -134,7 +131,7 @@ func (h *OpenAIResponsesAPIHandler) Compact(c *gin.Context) {
 		cliCancel(errMsg.Error)
 		return
 	}
-	applyUpstreamModelHeaders(c)
+	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
 	_, _ = c.Writer.Write(resp)
 	cliCancel()
 }
@@ -160,8 +157,7 @@ func (h *OpenAIResponsesAPIHandler) handleNonStreamingResponse(c *gin.Context, r
 		cliCancel(errMsg.Error)
 		return
 	}
-	resp = rewriteSpawnAgentExplorerInNonStreamingResponse(resp)
-	applyUpstreamModelHeaders(c)
+	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
 	_, _ = c.Writer.Write(resp)
 	cliCancel()
 }
@@ -196,7 +192,6 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 		c.Header("Cache-Control", "no-cache")
 		c.Header("Connection", "keep-alive")
 		c.Header("Access-Control-Allow-Origin", "*")
-		applyUpstreamModelHeaders(c)
 	}
 
 	// Peek at the first chunk
@@ -235,7 +230,6 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 			handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
 
 			// Write first chunk logic (matching forwardResponsesStream)
-			chunk = rewriteSpawnAgentExplorerChunk(chunk)
 			if bytes.HasPrefix(chunk, []byte("event:")) {
 				_, _ = c.Writer.Write([]byte("\n"))
 			}
@@ -253,7 +247,6 @@ func (h *OpenAIResponsesAPIHandler) handleStreamingResponse(c *gin.Context, rawJ
 func (h *OpenAIResponsesAPIHandler) forwardResponsesStream(c *gin.Context, flusher http.Flusher, cancel func(error), data <-chan []byte, errs <-chan *interfaces.ErrorMessage) {
 	h.ForwardStream(c, flusher, cancel, data, errs, handlers.StreamForwardOptions{
 		WriteChunk: func(chunk []byte) {
-			chunk = rewriteSpawnAgentExplorerChunk(chunk)
 			if bytes.HasPrefix(chunk, []byte("event:")) {
 				_, _ = c.Writer.Write([]byte("\n"))
 			}
@@ -279,173 +272,4 @@ func (h *OpenAIResponsesAPIHandler) forwardResponsesStream(c *gin.Context, flush
 			_, _ = c.Writer.Write([]byte("\n"))
 		},
 	})
-}
-
-func rewriteSpawnAgentExplorerChunk(chunk []byte) []byte {
-	if len(chunk) == 0 {
-		return chunk
-	}
-	lines := strings.Split(string(chunk), "\n")
-	changed := false
-	for i, line := range lines {
-		idx := strings.Index(line, "data:")
-		if idx < 0 {
-			continue
-		}
-		prefix := line[:idx]
-		rawData := strings.TrimSpace(line[idx+len("data:"):])
-		if rawData == "" || rawData == "[DONE]" || !gjson.Valid(rawData) {
-			continue
-		}
-		rewritten, ok := rewriteSpawnAgentExplorerPayload(rawData)
-		if !ok {
-			continue
-		}
-		lines[i] = prefix + "data: " + rewritten
-		changed = true
-	}
-	if !changed {
-		return chunk
-	}
-	return []byte(strings.Join(lines, "\n"))
-}
-
-func applyUpstreamModelHeaders(c *gin.Context) {
-	if c == nil {
-		return
-	}
-	raw, exists := c.Get(upstreamResponseHeadersContextKey)
-	if !exists {
-		return
-	}
-	headers, ok := raw.(http.Header)
-	if !ok || headers == nil {
-		return
-	}
-	model := firstHeaderValueCaseInsensitive(headers, "openai-model", "x-openai-model")
-	if model == "" {
-		return
-	}
-	c.Header("openai-model", model)
-	c.Header("x-openai-model", model)
-}
-
-func firstHeaderValueCaseInsensitive(headers http.Header, keys ...string) string {
-	if headers == nil {
-		return ""
-	}
-	for _, key := range keys {
-		if v := strings.TrimSpace(headers.Get(key)); v != "" {
-			return v
-		}
-		lowerKey := strings.ToLower(key)
-		for existingKey, values := range headers {
-			if strings.ToLower(existingKey) != lowerKey || len(values) == 0 {
-				continue
-			}
-			if v := strings.TrimSpace(values[0]); v != "" {
-				return v
-			}
-		}
-	}
-	return ""
-}
-
-func rewriteSpawnAgentExplorerPayload(payload string) (string, bool) {
-	eventType := gjson.Get(payload, "type").String()
-	switch eventType {
-	case "response.function_call_arguments.done":
-		args := gjson.Get(payload, "arguments").String()
-		rewrittenArgs, changed := stripExplorerAgentType(args)
-		if !changed {
-			return payload, false
-		}
-		updated, err := sjson.Set(payload, "arguments", rewrittenArgs)
-		if err != nil {
-			return payload, false
-		}
-		return updated, true
-	case "response.output_item.done":
-		toolName := gjson.Get(payload, "item.name").String()
-		if !strings.EqualFold(toolName, "spawn_agent") {
-			return payload, false
-		}
-		args := gjson.Get(payload, "item.arguments").String()
-		rewrittenArgs, changed := stripExplorerAgentType(args)
-		if !changed {
-			return payload, false
-		}
-		updated, err := sjson.Set(payload, "item.arguments", rewrittenArgs)
-		if err != nil {
-			return payload, false
-		}
-		return updated, true
-	default:
-		return payload, false
-	}
-}
-
-func stripExplorerAgentType(arguments string) (string, bool) {
-	raw := strings.TrimSpace(arguments)
-	if raw == "" || !gjson.Valid(raw) {
-		return arguments, false
-	}
-	agentType := strings.TrimSpace(gjson.Get(raw, "agent_type").String())
-	if !strings.EqualFold(agentType, "explorer") {
-		agentType = strings.TrimSpace(gjson.Get(raw, "agentType").String())
-	}
-	if !strings.EqualFold(agentType, "explorer") {
-		return arguments, false
-	}
-	updated, err := sjson.Delete(raw, "agent_type")
-	if err != nil {
-		return arguments, false
-	}
-	updated, err = sjson.Delete(updated, "agentType")
-	if err != nil {
-		return arguments, false
-	}
-	return updated, true
-}
-
-func rewriteSpawnAgentExplorerInNonStreamingResponse(body []byte) []byte {
-	if len(body) == 0 {
-		return body
-	}
-	raw := string(body)
-	if !gjson.Valid(raw) {
-		return body
-	}
-	output := gjson.Get(raw, "output")
-	if !output.Exists() || !output.IsArray() {
-		return body
-	}
-	updated := raw
-	changed := false
-	output.ForEach(func(key, item gjson.Result) bool {
-		if item.Get("type").String() != "function_call" {
-			return true
-		}
-		if !strings.EqualFold(item.Get("name").String(), "spawn_agent") {
-			return true
-		}
-		args := item.Get("arguments").String()
-		rewrittenArgs, argsChanged := stripExplorerAgentType(args)
-		if !argsChanged {
-			return true
-		}
-		index := int(key.Int())
-		path := fmt.Sprintf("output.%d.arguments", index)
-		next, err := sjson.Set(updated, path, rewrittenArgs)
-		if err != nil {
-			return true
-		}
-		updated = next
-		changed = true
-		return true
-	})
-	if !changed {
-		return body
-	}
-	return []byte(updated)
 }

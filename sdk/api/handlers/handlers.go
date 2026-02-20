@@ -7,7 +7,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -17,7 +16,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/promptqueue"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
@@ -48,23 +46,49 @@ type ErrorDetail struct {
 }
 
 const idempotencyKeyMetadataKey = "idempotency_key"
-const submissionIDMetadataKey = "submission_id"
 
 const (
 	defaultStreamingKeepAliveSeconds = 0
 	defaultStreamingBootstrapRetries = 0
-	defaultModelVisibilityNamespace  = "default"
 )
 
-var modelVisibilityNamespaceHeaders = []string{
-	"X-Model-Namespace",
-	"X-Base-URL-Namespace",
-	"X-Namespace",
+type pinnedAuthContextKey struct{}
+type selectedAuthCallbackContextKey struct{}
+type executionSessionContextKey struct{}
+
+// WithPinnedAuthID returns a child context that requests execution on a specific auth ID.
+func WithPinnedAuthID(ctx context.Context, authID string) context.Context {
+	authID = strings.TrimSpace(authID)
+	if authID == "" {
+		return ctx
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, pinnedAuthContextKey{}, authID)
 }
 
-var modelVisibilityNamespaceQueryParams = []string{
-	"namespace",
-	"model_namespace",
+// WithSelectedAuthIDCallback returns a child context that receives the selected auth ID.
+func WithSelectedAuthIDCallback(ctx context.Context, callback func(string)) context.Context {
+	if callback == nil {
+		return ctx
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, selectedAuthCallbackContextKey{}, callback)
+}
+
+// WithExecutionSessionID returns a child context tagged with a long-lived execution session ID.
+func WithExecutionSessionID(ctx context.Context, sessionID string) context.Context {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" {
+		return ctx
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, executionSessionContextKey{}, sessionID)
 }
 
 // BuildErrorResponseBody builds an OpenAI-compatible JSON error response body.
@@ -155,7 +179,13 @@ func StreamingBootstrapRetries(cfg *config.SDKConfig) int {
 	return retries
 }
 
-func requestExecutionMetadata(ctx context.Context, rawJSON []byte) map[string]any {
+// PassthroughHeadersEnabled returns whether upstream response headers should be forwarded to clients.
+// Default is false.
+func PassthroughHeadersEnabled(cfg *config.SDKConfig) bool {
+	return cfg != nil && cfg.PassthroughHeaders
+}
+
+func requestExecutionMetadata(ctx context.Context) map[string]any {
 	// Idempotency-Key is an optional client-supplied header used to correlate retries.
 	// It is forwarded as execution metadata; when absent we generate a UUID.
 	key := ""
@@ -167,62 +197,59 @@ func requestExecutionMetadata(ctx context.Context, rawJSON []byte) map[string]an
 	if key == "" {
 		key = uuid.NewString()
 	}
+
 	meta := map[string]any{idempotencyKeyMetadataKey: key}
-	if sessionKey := deriveSessionAffinityKey(ctx, rawJSON); sessionKey != "" {
-		meta[coreexecutor.SessionAffinityKeyMetadataKey] = sessionKey
+	if pinnedAuthID := pinnedAuthIDFromContext(ctx); pinnedAuthID != "" {
+		meta[coreexecutor.PinnedAuthMetadataKey] = pinnedAuthID
+	}
+	if selectedCallback := selectedAuthIDCallbackFromContext(ctx); selectedCallback != nil {
+		meta[coreexecutor.SelectedAuthCallbackMetadataKey] = selectedCallback
+	}
+	if executionSessionID := executionSessionIDFromContext(ctx); executionSessionID != "" {
+		meta[coreexecutor.ExecutionSessionMetadataKey] = executionSessionID
 	}
 	return meta
 }
 
-func deriveSessionAffinityKey(ctx context.Context, rawJSON []byte) string {
-	headerCandidates := []string{
-		"session_id",
-		"Session_id",
-		"x-session-id",
-		"x-codex-session-id",
-		"x-jarvis-run-id",
-		"x-jarvis-task-id",
-		"conversation_id",
-		"Conversation_id",
+func pinnedAuthIDFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
 	}
-	if ctx != nil {
-		if ginCtx, ok := ctx.Value("gin").(*gin.Context); ok && ginCtx != nil && ginCtx.Request != nil {
-			for _, header := range headerCandidates {
-				if val := strings.TrimSpace(ginCtx.GetHeader(header)); val != "" {
-					return val
-				}
-			}
-		}
+	raw := ctx.Value(pinnedAuthContextKey{})
+	switch v := raw.(type) {
+	case string:
+		return strings.TrimSpace(v)
+	case []byte:
+		return strings.TrimSpace(string(v))
+	default:
+		return ""
 	}
+}
 
-	if len(rawJSON) == 0 {
+func selectedAuthIDCallbackFromContext(ctx context.Context) func(string) {
+	if ctx == nil {
+		return nil
+	}
+	raw := ctx.Value(selectedAuthCallbackContextKey{})
+	if callback, ok := raw.(func(string)); ok && callback != nil {
+		return callback
+	}
+	return nil
+}
+
+func executionSessionIDFromContext(ctx context.Context) string {
+	if ctx == nil {
 		return ""
 	}
-	var payload map[string]any
-	if err := json.Unmarshal(rawJSON, &payload); err != nil {
+	raw := ctx.Value(executionSessionContextKey{})
+	switch v := raw.(type) {
+	case string:
+		return strings.TrimSpace(v)
+	case []byte:
+		return strings.TrimSpace(string(v))
+	default:
 		return ""
 	}
-	payloadCandidates := []string{
-		"session_id",
-		"sessionId",
-		"conversation_id",
-		"conversationId",
-		"prompt_cache_key",
-		"previous_response_id",
-		"response_id",
-		"thread_id",
-		"run_id",
-	}
-	for _, key := range payloadCandidates {
-		if raw, ok := payload[key]; ok {
-			if str, ok := raw.(string); ok {
-				if trimmed := strings.TrimSpace(str); trimmed != "" {
-					return trimmed
-				}
-			}
-		}
-	}
-	return ""
 }
 
 // BaseAPIHandler contains the handlers for API endpoints.
@@ -234,9 +261,6 @@ type BaseAPIHandler struct {
 
 	// Cfg holds the current application configuration.
 	Cfg *config.SDKConfig
-
-	// PromptQueue serialises per-session prompts with durable journaling.
-	PromptQueue *promptqueue.Manager
 }
 
 // NewBaseAPIHandlers creates a new API handlers instance.
@@ -252,7 +276,6 @@ func NewBaseAPIHandlers(cfg *config.SDKConfig, authManager *coreauth.Manager) *B
 	return &BaseAPIHandler{
 		Cfg:         cfg,
 		AuthManager: authManager,
-		PromptQueue: promptqueue.GetDefaultManager(),
 	}
 }
 
@@ -444,15 +467,12 @@ func appendAPIResponse(c *gin.Context, data []byte) {
 
 // ExecuteWithAuthManager executes a non-streaming request via the core auth manager.
 // This path is the only supported execution route.
-func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) ([]byte, *interfaces.ErrorMessage) {
-	if errMsg := h.enforceModelVisibility(ctx, modelName); errMsg != nil {
-		return nil, errMsg
-	}
+func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) ([]byte, http.Header, *interfaces.ErrorMessage) {
 	providers, normalizedModel, errMsg := h.getRequestDetails(modelName)
 	if errMsg != nil {
 		return nil, nil, errMsg
 	}
-	reqMeta := requestExecutionMetadata(ctx, rawJSON)
+	reqMeta := requestExecutionMetadata(ctx)
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
 	payload := rawJSON
 	if len(payload) == 0 {
@@ -469,49 +489,36 @@ func (h *BaseAPIHandler) ExecuteWithAuthManager(ctx context.Context, handlerType
 		SourceFormat:    sdktranslator.FromString(handlerType),
 	}
 	opts.Metadata = reqMeta
-	var (
-		respPayload []byte
-		execErr     error
-	)
-	queueReq := promptqueue.SubmitRequest{
-		SessionKey: queueSessionKey(providers, normalizedModel, reqMeta),
-		Handler:    handlerType,
-		Model:      normalizedModel,
-		RequestID:  logging.GetRequestID(ctx),
-	}
-	_, submitErr := h.PromptQueue.SubmitAndWait(queueReq, func(submissionID string) error {
-		reqMetaForRun := cloneMetadata(reqMeta)
-		reqMetaForRun[submissionIDMetadataKey] = submissionID
-		req.Metadata = reqMetaForRun
-		opts.Metadata = reqMetaForRun
-		resp, err := h.AuthManager.Execute(ctx, providers, req, opts)
-		if err != nil {
-			execErr = err
-			return err
+	resp, err := h.AuthManager.Execute(ctx, providers, req, opts)
+	if err != nil {
+		status := http.StatusInternalServerError
+		if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
+			if code := se.StatusCode(); code > 0 {
+				status = code
+			}
 		}
-		respPayload = cloneBytes(resp.Payload)
-		return nil
-	})
-	if execErr != nil {
-		return nil, toErrorMessage(execErr)
+		var addon http.Header
+		if he, ok := err.(interface{ Headers() http.Header }); ok && he != nil {
+			if hdr := he.Headers(); hdr != nil {
+				addon = hdr.Clone()
+			}
+		}
+		return nil, nil, &interfaces.ErrorMessage{StatusCode: status, Error: err, Addon: addon}
 	}
-	if submitErr != nil {
-		return nil, toErrorMessage(submitErr)
+	if !PassthroughHeadersEnabled(h.Cfg) {
+		return resp.Payload, nil, nil
 	}
-	return respPayload, nil
+	return resp.Payload, FilterUpstreamHeaders(resp.Headers), nil
 }
 
 // ExecuteCountWithAuthManager executes a non-streaming request via the core auth manager.
 // This path is the only supported execution route.
-func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) ([]byte, *interfaces.ErrorMessage) {
-	if errMsg := h.enforceModelVisibility(ctx, modelName); errMsg != nil {
-		return nil, errMsg
-	}
+func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) ([]byte, http.Header, *interfaces.ErrorMessage) {
 	providers, normalizedModel, errMsg := h.getRequestDetails(modelName)
 	if errMsg != nil {
 		return nil, nil, errMsg
 	}
-	reqMeta := requestExecutionMetadata(ctx, rawJSON)
+	reqMeta := requestExecutionMetadata(ctx)
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
 	payload := rawJSON
 	if len(payload) == 0 {
@@ -552,13 +559,8 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 
 // ExecuteStreamWithAuthManager executes a streaming request via the core auth manager.
 // This path is the only supported execution route.
-func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) (<-chan []byte, <-chan *interfaces.ErrorMessage) {
-	if errMsg := h.enforceModelVisibility(ctx, modelName); errMsg != nil {
-		errChan := make(chan *interfaces.ErrorMessage, 1)
-		errChan <- errMsg
-		close(errChan)
-		return nil, errChan
-	}
+// The returned http.Header carries upstream response headers captured before streaming begins.
+func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) (<-chan []byte, http.Header, <-chan *interfaces.ErrorMessage) {
 	providers, normalizedModel, errMsg := h.getRequestDetails(modelName)
 	if errMsg != nil {
 		errChan := make(chan *interfaces.ErrorMessage, 1)
@@ -566,7 +568,7 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 		close(errChan)
 		return nil, nil, errChan
 	}
-	reqMeta := requestExecutionMetadata(ctx, rawJSON)
+	reqMeta := requestExecutionMetadata(ctx)
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = normalizedModel
 	payload := rawJSON
 	if len(payload) == 0 {
@@ -583,13 +585,44 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 		SourceFormat:    sdktranslator.FromString(handlerType),
 	}
 	opts.Metadata = reqMeta
-
+	streamResult, err := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
+	if err != nil {
+		errChan := make(chan *interfaces.ErrorMessage, 1)
+		status := http.StatusInternalServerError
+		if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
+			if code := se.StatusCode(); code > 0 {
+				status = code
+			}
+		}
+		var addon http.Header
+		if he, ok := err.(interface{ Headers() http.Header }); ok && he != nil {
+			if hdr := he.Headers(); hdr != nil {
+				addon = hdr.Clone()
+			}
+		}
+		errChan <- &interfaces.ErrorMessage{StatusCode: status, Error: err, Addon: addon}
+		close(errChan)
+		return nil, nil, errChan
+	}
+	passthroughHeadersEnabled := PassthroughHeadersEnabled(h.Cfg)
+	// Capture upstream headers from the initial connection synchronously before the goroutine starts.
+	// Keep a mutable map so bootstrap retries can replace it before first payload is sent.
+	var upstreamHeaders http.Header
+	if passthroughHeadersEnabled {
+		upstreamHeaders = cloneHeader(FilterUpstreamHeaders(streamResult.Headers))
+		if upstreamHeaders == nil {
+			upstreamHeaders = make(http.Header)
+		}
+	}
+	chunks := streamResult.Chunks
 	dataChan := make(chan []byte)
 	errChan := make(chan *interfaces.ErrorMessage, 1)
-
 	go func() {
 		defer close(dataChan)
 		defer close(errChan)
+		sentPayload := false
+		bootstrapRetries := 0
+		maxBootstrapRetries := StreamingBootstrapRetries(h.Cfg)
 
 		sendErr := func(msg *interfaces.ErrorMessage) bool {
 			if ctx == nil {
@@ -617,97 +650,81 @@ func (h *BaseAPIHandler) ExecuteStreamWithAuthManager(ctx context.Context, handl
 			}
 		}
 
-		var streamErr error
-		queueReq := promptqueue.SubmitRequest{
-			SessionKey: queueSessionKey(providers, normalizedModel, reqMeta),
-			Handler:    handlerType,
-			Model:      normalizedModel,
-			RequestID:  logging.GetRequestID(ctx),
+		bootstrapEligible := func(err error) bool {
+			status := statusFromError(err)
+			if status == 0 {
+				return true
+			}
+			switch status {
+			case http.StatusUnauthorized, http.StatusForbidden, http.StatusPaymentRequired,
+				http.StatusRequestTimeout, http.StatusTooManyRequests:
+				return true
+			default:
+				return status >= http.StatusInternalServerError
+			}
 		}
 
-		_, submitErr := h.PromptQueue.SubmitAndWait(queueReq, func(submissionID string) error {
-			reqMetaForRun := cloneMetadata(reqMeta)
-			reqMetaForRun[submissionIDMetadataKey] = submissionID
-			req.Metadata = reqMetaForRun
-			opts.Metadata = reqMetaForRun
-
-			chunks, err := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
-			if err != nil {
-				streamErr = err
-				return err
-			}
-
-			sentPayload := false
-			bootstrapRetries := 0
-			maxBootstrapRetries := StreamingBootstrapRetries(h.Cfg)
-
-			bootstrapEligible := func(err error) bool {
-				status := statusFromError(err)
-				if status == 0 {
-					return true
-				}
-				switch status {
-				case http.StatusUnauthorized, http.StatusForbidden, http.StatusPaymentRequired,
-					http.StatusRequestTimeout, http.StatusTooManyRequests:
-					return true
-				default:
-					return status >= http.StatusInternalServerError
-				}
-			}
-
-		outer:
+	outer:
+		for {
 			for {
-				for {
-					var chunk coreexecutor.StreamChunk
-					var ok bool
-					if ctx != nil {
-						select {
-						case <-ctx.Done():
-							return context.Canceled
-						case chunk, ok = <-chunks:
-						}
-					} else {
-						chunk, ok = <-chunks
+				var chunk coreexecutor.StreamChunk
+				var ok bool
+				if ctx != nil {
+					select {
+					case <-ctx.Done():
+						return
+					case chunk, ok = <-chunks:
 					}
-					if !ok {
-						return nil
-					}
-					if chunk.Err != nil {
-						streamErr = chunk.Err
-						if !sentPayload {
-							if bootstrapRetries < maxBootstrapRetries && bootstrapEligible(streamErr) {
-								bootstrapRetries++
-								retryChunks, retryErr := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
-								if retryErr == nil {
-									streamErr = nil
-									chunks = retryChunks
-									continue outer
+				} else {
+					chunk, ok = <-chunks
+				}
+				if !ok {
+					return
+				}
+				if chunk.Err != nil {
+					streamErr := chunk.Err
+					// Safe bootstrap recovery: if the upstream fails before any payload bytes are sent,
+					// retry a few times (to allow auth rotation / transient recovery) and then attempt model fallback.
+					if !sentPayload {
+						if bootstrapRetries < maxBootstrapRetries && bootstrapEligible(streamErr) {
+							bootstrapRetries++
+							retryResult, retryErr := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
+							if retryErr == nil {
+								if passthroughHeadersEnabled {
+									replaceHeader(upstreamHeaders, FilterUpstreamHeaders(retryResult.Headers))
 								}
-								streamErr = retryErr
+								chunks = retryResult.Chunks
+								continue outer
 							}
+							streamErr = retryErr
 						}
-						return streamErr
 					}
-					if len(chunk.Payload) > 0 {
-						sentPayload = true
-						if okSendData := sendData(cloneBytes(chunk.Payload)); !okSendData {
-							return context.Canceled
+
+					status := http.StatusInternalServerError
+					if se, ok := streamErr.(interface{ StatusCode() int }); ok && se != nil {
+						if code := se.StatusCode(); code > 0 {
+							status = code
 						}
+					}
+					var addon http.Header
+					if he, ok := streamErr.(interface{ Headers() http.Header }); ok && he != nil {
+						if hdr := he.Headers(); hdr != nil {
+							addon = hdr.Clone()
+						}
+					}
+					_ = sendErr(&interfaces.ErrorMessage{StatusCode: status, Error: streamErr, Addon: addon})
+					return
+				}
+				if len(chunk.Payload) > 0 {
+					sentPayload = true
+					if okSendData := sendData(cloneBytes(chunk.Payload)); !okSendData {
+						return
 					}
 				}
 			}
-		})
-
-		if streamErr != nil {
-			_ = sendErr(toErrorMessage(streamErr))
-			return
-		}
-		if submitErr != nil {
-			_ = sendErr(toErrorMessage(submitErr))
 		}
 	}()
-
-	return dataChan, errChan
+	return dataChan, upstreamHeaders, errChan
 }
 
 func statusFromError(err error) int {
@@ -720,62 +737,6 @@ func statusFromError(err error) int {
 		}
 	}
 	return 0
-}
-
-func toErrorMessage(err error) *interfaces.ErrorMessage {
-	if err == nil {
-		return nil
-	}
-	status := http.StatusInternalServerError
-	if se, ok := err.(interface{ StatusCode() int }); ok && se != nil {
-		if code := se.StatusCode(); code > 0 {
-			status = code
-		}
-	}
-	var addon http.Header
-	if he, ok := err.(interface{ Headers() http.Header }); ok && he != nil {
-		if hdr := he.Headers(); hdr != nil {
-			addon = hdr.Clone()
-		}
-	}
-	return &interfaces.ErrorMessage{StatusCode: status, Error: err, Addon: addon}
-}
-
-func cloneMetadata(meta map[string]any) map[string]any {
-	if len(meta) == 0 {
-		return map[string]any{}
-	}
-	out := make(map[string]any, len(meta))
-	for key, value := range meta {
-		out[key] = value
-	}
-	return out
-}
-
-func queueSessionKey(providers []string, model string, reqMeta map[string]any) string {
-	if len(reqMeta) > 0 {
-		raw, ok := reqMeta[coreexecutor.SessionAffinityKeyMetadataKey]
-		if ok && raw != nil {
-			if key, ok := raw.(string); ok {
-				key = strings.TrimSpace(key)
-				if key != "" {
-					return key
-				}
-			}
-		}
-	}
-	providerKey := "unknown"
-	if len(providers) > 0 {
-		candidate := strings.TrimSpace(providers[0])
-		if candidate != "" {
-			providerKey = candidate
-		}
-	}
-	modelKey := strings.TrimSpace(model)
-	if modelKey == "" {
-		modelKey = "unknown"
-	}
-	return providerKey + "|" + modelKey
 }
 
 func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string, normalizedModel string, err *interfaces.ErrorMessage) {
@@ -808,458 +769,10 @@ func (h *BaseAPIHandler) getRequestDetails(modelName string) (providers []string
 	if len(providers) == 0 {
 		return nil, "", &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: fmt.Errorf("unknown provider for model %s", modelName)}
 	}
-	providers, routeErr := h.filterProvidersByModelProviderRouting(resolvedModelName, baseModel, providers)
-	if routeErr != nil {
-		return nil, "", routeErr
-	}
 
 	// The thinking suffix is preserved in the model name itself, so no
 	// metadata-based configuration passing is needed.
 	return providers, resolvedModelName, nil
-}
-
-func (h *BaseAPIHandler) filterProvidersByModelProviderRouting(modelName, baseModel string, providers []string) ([]string, *interfaces.ErrorMessage) {
-	if h == nil || h.Cfg == nil || !h.Cfg.ModelProviderRouting.Enabled {
-		return providers, nil
-	}
-	if len(providers) == 0 {
-		return providers, nil
-	}
-
-	allowlist := h.Cfg.ModelProviderRouting.FamilyProviderAllowlist
-	if len(allowlist) == 0 {
-		return nil, &interfaces.ErrorMessage{
-			StatusCode: http.StatusForbidden,
-			Error:      fmt.Errorf("model-provider-routing is enabled but family-provider-allowlist is empty"),
-		}
-	}
-
-	familyCandidates := modelProviderRoutingFamilyCandidates(baseModel, providers)
-	familyKey, allowedProviders := lookupModelProviderAllowlist(allowlist, familyCandidates)
-	if len(allowedProviders) == 0 {
-		return nil, &interfaces.ErrorMessage{
-			StatusCode: http.StatusForbidden,
-			Error: fmt.Errorf(
-				"model %q is blocked by model-provider-routing: no allowed providers configured for family candidates %v",
-				strings.TrimSpace(modelName),
-				familyCandidates,
-			),
-		}
-	}
-
-	filtered := filterProvidersByAllowlist(providers, allowedProviders)
-	if len(filtered) == 0 {
-		return nil, &interfaces.ErrorMessage{
-			StatusCode: http.StatusForbidden,
-			Error: fmt.Errorf(
-				"model %q is blocked by model-provider-routing: family %q allows %v but resolved providers are %v",
-				strings.TrimSpace(modelName),
-				familyKey,
-				allowedProviders,
-				providers,
-			),
-		}
-	}
-
-	return filtered, nil
-}
-
-func lookupModelProviderAllowlist(allowlist map[string][]string, familyCandidates []string) (familyKey string, providers []string) {
-	if len(allowlist) == 0 || len(familyCandidates) == 0 {
-		return "", nil
-	}
-	for _, candidate := range familyCandidates {
-		key := strings.ToLower(strings.TrimSpace(candidate))
-		if key == "" {
-			continue
-		}
-		if allowed, ok := allowlist[key]; ok && len(allowed) > 0 {
-			return key, allowed
-		}
-		for rawFamily, allowed := range allowlist {
-			if strings.EqualFold(strings.TrimSpace(rawFamily), key) && len(allowed) > 0 {
-				return strings.ToLower(strings.TrimSpace(rawFamily)), allowed
-			}
-		}
-	}
-	return "", nil
-}
-
-func filterProvidersByAllowlist(providers []string, allowedProviders []string) []string {
-	if len(providers) == 0 || len(allowedProviders) == 0 {
-		return nil
-	}
-	allowedSet := make(map[string]struct{}, len(allowedProviders))
-	for _, raw := range allowedProviders {
-		key := strings.ToLower(strings.TrimSpace(raw))
-		if key == "" {
-			continue
-		}
-		allowedSet[key] = struct{}{}
-	}
-	if len(allowedSet) == 0 {
-		return nil
-	}
-
-	filtered := make([]string, 0, len(providers))
-	for _, provider := range providers {
-		key := strings.ToLower(strings.TrimSpace(provider))
-		if key == "" {
-			continue
-		}
-		if _, ok := allowedSet[key]; ok {
-			filtered = append(filtered, provider)
-		}
-	}
-	return filtered
-}
-
-func modelProviderRoutingFamilyCandidates(baseModel string, providers []string) []string {
-	seen := make(map[string]struct{}, len(providers)+2)
-	out := make([]string, 0, len(providers)+2)
-	add := func(raw string) {
-		key := strings.ToLower(strings.TrimSpace(raw))
-		if key == "" {
-			return
-		}
-		if _, exists := seen[key]; exists {
-			return
-		}
-		seen[key] = struct{}{}
-		out = append(out, key)
-	}
-
-	add(modelFamilyFromModelName(baseModel))
-	for _, provider := range providers {
-		add(provider)
-		add(modelFamilyFromProvider(provider))
-	}
-	return out
-}
-
-func modelFamilyFromProvider(provider string) string {
-	switch strings.ToLower(strings.TrimSpace(provider)) {
-	case "codex", "openai":
-		return "codex"
-	case "claude":
-		return "claude"
-	case "gemini", "gemini-cli", "vertex", "aistudio":
-		return "gemini"
-	default:
-		return ""
-	}
-}
-
-func modelFamilyFromModelName(modelName string) string {
-	normalized := strings.ToLower(strings.TrimSpace(thinking.ParseSuffix(modelName).ModelName))
-	if normalized == "" {
-		return ""
-	}
-	if idx := strings.LastIndex(normalized, "/"); idx >= 0 && idx < len(normalized)-1 {
-		normalized = normalized[idx+1:]
-	}
-
-	switch {
-	case strings.HasPrefix(normalized, "gpt-"),
-		strings.HasPrefix(normalized, "o1"),
-		strings.HasPrefix(normalized, "o3"),
-		strings.HasPrefix(normalized, "chatgpt"),
-		strings.Contains(normalized, "codex"):
-		return "codex"
-	case strings.HasPrefix(normalized, "claude"):
-		return "claude"
-	case strings.HasPrefix(normalized, "gemini"):
-		return "gemini"
-	case strings.HasPrefix(normalized, "qwen"):
-		return "qwen"
-	case strings.HasPrefix(normalized, "kimi"):
-		return "kimi"
-	case strings.HasPrefix(normalized, "glm"), strings.HasPrefix(normalized, "iflow"):
-		return "iflow"
-	default:
-		return ""
-	}
-}
-
-func (h *BaseAPIHandler) enforceModelVisibility(ctx context.Context, modelName string) *interfaces.ErrorMessage {
-	allowlist, guardEnabled, namespace := h.modelVisibilityAllowlistFromContext(ctx)
-	if !guardEnabled {
-		return nil
-	}
-
-	if len(allowlist) == 0 {
-		targetNamespace := strings.TrimSpace(namespace)
-		if targetNamespace == "" {
-			targetNamespace = defaultModelVisibilityNamespace
-		}
-		return &interfaces.ErrorMessage{
-			StatusCode: http.StatusForbidden,
-			Error:      fmt.Errorf("model visibility namespace %q has no allowed models configured", targetNamespace),
-		}
-	}
-
-	if modelVisibilityModelAllowed(modelName, allowlist) {
-		return nil
-	}
-
-	targetNamespace := strings.TrimSpace(namespace)
-	if targetNamespace == "" {
-		targetNamespace = defaultModelVisibilityNamespace
-	}
-	return &interfaces.ErrorMessage{
-		StatusCode: http.StatusForbidden,
-		Error:      fmt.Errorf("model %q is not allowed for namespace %q", strings.TrimSpace(modelName), targetNamespace),
-	}
-}
-
-// ValidateModelVisibility validates whether the requested model is visible in the request namespace.
-// It returns nil when model visibility guard is disabled or when the model is allowed.
-func (h *BaseAPIHandler) ValidateModelVisibility(c *gin.Context, modelName string) *interfaces.ErrorMessage {
-	ctx := context.Background()
-	if c != nil {
-		ctx = context.WithValue(ctx, "gin", c)
-	}
-	return h.enforceModelVisibility(ctx, modelName)
-}
-
-// FilterVisibleModels applies model-visibility allowlist filtering to model metadata.
-// When model visibility is disabled or not configured, models are returned unchanged.
-func (h *BaseAPIHandler) FilterVisibleModels(c *gin.Context, models []map[string]any) []map[string]any {
-	if len(models) == 0 {
-		return models
-	}
-	allowlist, guardEnabled, _ := h.modelVisibilityAllowlist(c)
-	if !guardEnabled {
-		return models
-	}
-	if len(allowlist) == 0 {
-		return []map[string]any{}
-	}
-
-	filtered := make([]map[string]any, 0, len(models))
-	for _, model := range models {
-		if model == nil {
-			continue
-		}
-		modelID, _ := model["id"].(string)
-		if modelID == "" {
-			if fallbackName, ok := model["name"].(string); ok {
-				modelID = fallbackName
-			}
-		}
-		if modelVisibilityModelAllowed(modelID, allowlist) {
-			filtered = append(filtered, model)
-		}
-	}
-	return filtered
-}
-
-func (h *BaseAPIHandler) modelVisibilityAllowlistFromContext(ctx context.Context) (map[string]struct{}, bool, string) {
-	if ctx == nil {
-		return h.modelVisibilityAllowlist(nil)
-	}
-	ginCtx, _ := ctx.Value("gin").(*gin.Context)
-	return h.modelVisibilityAllowlist(ginCtx)
-}
-
-func (h *BaseAPIHandler) modelVisibilityAllowlist(c *gin.Context) (map[string]struct{}, bool, string) {
-	if h == nil || h.Cfg == nil || !h.Cfg.ModelVisibility.Enabled || len(h.Cfg.ModelVisibility.Namespaces) == 0 {
-		return nil, false, ""
-	}
-
-	namespace := strings.TrimSpace(h.resolveModelVisibilityNamespace(c))
-	if namespace == "" {
-		if _, ok := h.Cfg.ModelVisibility.Namespaces[defaultModelVisibilityNamespace]; ok {
-			namespace = defaultModelVisibilityNamespace
-		} else if len(h.Cfg.ModelVisibility.Namespaces) == 1 {
-			for key := range h.Cfg.ModelVisibility.Namespaces {
-				namespace = strings.TrimSpace(key)
-				break
-			}
-		}
-	}
-
-	if namespace == "" {
-		return nil, true, ""
-	}
-
-	models, ok := lookupModelVisibilityNamespaceModels(h.Cfg.ModelVisibility.Namespaces, namespace)
-	if !ok {
-		return nil, true, namespace
-	}
-
-	allowlist := make(map[string]struct{}, len(models))
-	for _, model := range models {
-		key := strings.ToLower(strings.TrimSpace(model))
-		if key == "" {
-			continue
-		}
-		allowlist[key] = struct{}{}
-	}
-	if len(allowlist) == 0 {
-		return nil, true, namespace
-	}
-	return allowlist, true, namespace
-}
-
-func (h *BaseAPIHandler) resolveModelVisibilityNamespace(c *gin.Context) string {
-	if c == nil {
-		return ""
-	}
-	if namespace := h.resolveModelVisibilityNamespaceByHost(c); namespace != "" {
-		return namespace
-	}
-
-	for _, headerName := range modelVisibilityNamespaceHeaders {
-		if namespace := strings.TrimSpace(c.GetHeader(headerName)); namespace != "" {
-			return namespace
-		}
-	}
-	for _, queryKey := range modelVisibilityNamespaceQueryParams {
-		if namespace := strings.TrimSpace(c.Query(queryKey)); namespace != "" {
-			return namespace
-		}
-	}
-	return ""
-}
-
-func (h *BaseAPIHandler) resolveModelVisibilityNamespaceByHost(c *gin.Context) string {
-	if h == nil || h.Cfg == nil || len(h.Cfg.ModelVisibility.HostNamespaces) == 0 || c == nil {
-		return ""
-	}
-	return lookupModelVisibilityHostNamespace(h.Cfg.ModelVisibility.HostNamespaces, modelVisibilityHostCandidates(c))
-}
-
-func lookupModelVisibilityHostNamespace(hostNamespaces map[string]string, hostCandidates []string) string {
-	if len(hostNamespaces) == 0 || len(hostCandidates) == 0 {
-		return ""
-	}
-
-	normalizedMap := make(map[string]string, len(hostNamespaces))
-	for rawHost, namespace := range hostNamespaces {
-		hostKey := normalizeModelVisibilityHost(rawHost)
-		ns := strings.TrimSpace(namespace)
-		if hostKey == "" || ns == "" {
-			continue
-		}
-		normalizedMap[hostKey] = ns
-	}
-	if len(normalizedMap) == 0 {
-		return ""
-	}
-
-	for _, candidate := range hostCandidates {
-		hostKey := normalizeModelVisibilityHost(candidate)
-		if hostKey == "" {
-			continue
-		}
-		if namespace, ok := normalizedMap[hostKey]; ok {
-			return namespace
-		}
-	}
-	return ""
-}
-
-func modelVisibilityHostCandidates(c *gin.Context) []string {
-	if c == nil {
-		return nil
-	}
-	candidates := make([]string, 0, 4)
-	add := func(raw string) {
-		host := strings.TrimSpace(raw)
-		if host == "" {
-			return
-		}
-		// X-Forwarded-Host may contain a comma-separated chain.
-		if idx := strings.Index(host, ","); idx >= 0 {
-			host = strings.TrimSpace(host[:idx])
-		}
-		if host != "" {
-			candidates = append(candidates, host)
-		}
-	}
-	if c.Request != nil {
-		add(c.Request.Host)
-	}
-	add(c.GetHeader("X-Forwarded-Host"))
-	add(c.GetHeader("X-Original-Host"))
-	add(c.GetHeader("Host"))
-	return candidates
-}
-
-func normalizeModelVisibilityHost(rawHost string) string {
-	host := strings.TrimSpace(strings.ToLower(rawHost))
-	if host == "" {
-		return ""
-	}
-	if idx := strings.Index(host, "://"); idx >= 0 {
-		host = host[idx+3:]
-	}
-	if idx := strings.Index(host, "/"); idx >= 0 {
-		host = host[:idx]
-	}
-	if parsedHost, port, err := net.SplitHostPort(host); err == nil {
-		if port != "" {
-			host = parsedHost
-		}
-	}
-	host = strings.Trim(host, "[]")
-	return strings.TrimSpace(strings.ToLower(host))
-}
-
-func lookupModelVisibilityNamespaceModels(namespaces map[string][]string, namespace string) ([]string, bool) {
-	if len(namespaces) == 0 {
-		return nil, false
-	}
-	if models, ok := namespaces[namespace]; ok {
-		return models, true
-	}
-	for key, models := range namespaces {
-		if strings.EqualFold(strings.TrimSpace(key), namespace) {
-			return models, true
-		}
-	}
-	return nil, false
-}
-
-func modelVisibilityModelAllowed(modelName string, allowlist map[string]struct{}) bool {
-	if len(allowlist) == 0 {
-		return false
-	}
-	candidates := modelVisibilityCandidates(modelName)
-	for _, candidate := range candidates {
-		if _, ok := allowlist[candidate]; ok {
-			return true
-		}
-	}
-	return false
-}
-
-func modelVisibilityCandidates(modelName string) []string {
-	seen := make(map[string]struct{}, 3)
-	out := make([]string, 0, 3)
-	add := func(v string) {
-		key := strings.ToLower(strings.TrimSpace(v))
-		if key == "" {
-			return
-		}
-		if _, exists := seen[key]; exists {
-			return
-		}
-		seen[key] = struct{}{}
-		out = append(out, key)
-	}
-
-	trimmedModel := strings.TrimSpace(modelName)
-	add(trimmedModel)
-
-	resolvedModel := util.ResolveAutoModel(trimmedModel)
-	add(resolvedModel)
-
-	parsed := thinking.ParseSuffix(resolvedModel)
-	add(parsed.ModelName)
-
-	return out
 }
 
 func cloneBytes(src []byte) []byte {

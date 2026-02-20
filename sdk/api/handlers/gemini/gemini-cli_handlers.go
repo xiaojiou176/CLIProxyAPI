@@ -67,14 +67,6 @@ func (h *GeminiCLIAPIHandler) CLIHandler(c *gin.Context) {
 	} else if requestRawURI == "/v1internal:streamGenerateContent" {
 		h.handleInternalStreamGenerateContent(c, rawJSON)
 	} else {
-		modelName := strings.TrimSpace(gjson.GetBytes(rawJSON, "model").String())
-		if modelName != "" {
-			if errMsg := h.ValidateModelVisibility(c, modelName); errMsg != nil {
-				h.WriteErrorResponse(c, errMsg)
-				return
-			}
-		}
-
 		reqBody := bytes.NewBuffer(rawJSON)
 		req, err := http.NewRequest("POST", fmt.Sprintf("https://cloudcode-pa.googleapis.com%s", c.Request.URL.RequestURI()), reqBody)
 		if err != nil {

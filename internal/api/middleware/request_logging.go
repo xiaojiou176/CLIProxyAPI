@@ -12,6 +12,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
 )
 
 const maxErrorOnlyCapturedRequestBodyBytes int64 = 1 << 20 // 1 MiB
@@ -107,12 +108,12 @@ func shouldCaptureRequestBody(loggerEnabled bool, req *http.Request) bool {
 // captureRequestInfo extracts relevant information from the incoming HTTP request.
 // It captures the URL, method, headers, and body. The request body is read and then
 // restored so that it can be processed by subsequent handlers.
-func captureRequestInfo(c *gin.Context) (*RequestInfo, error) {
-	// Capture URL query in raw form for full-fidelity debugging.
-	rawQuery := c.Request.URL.RawQuery
+func captureRequestInfo(c *gin.Context, captureBody bool) (*RequestInfo, error) {
+	// Capture URL with sensitive query parameters masked
+	maskedQuery := util.MaskSensitiveQuery(c.Request.URL.RawQuery)
 	url := c.Request.URL.Path
-	if rawQuery != "" {
-		url += "?" + rawQuery
+	if maskedQuery != "" {
+		url += "?" + maskedQuery
 	}
 
 	// Capture method

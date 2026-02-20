@@ -4,14 +4,9 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
-	"math"
 	"net/http"
-	"os"
-	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
@@ -33,288 +28,11 @@ import (
 )
 
 const (
-	defaultCodexClientVersion      = "dev"
-	upstreamResponseHeadersContext = "UPSTREAM_RESPONSE_HEADERS"
+	codexClientVersion = "0.101.0"
+	codexUserAgent     = "codex_cli_rs/0.101.0 (Mac OS 26.0.1; arm64) Apple_Terminal/464"
 )
 
 var dataTag = []byte("data:")
-var eventTag = []byte("event:")
-
-var codexRetryAfterPattern = regexp.MustCompile(`(?i)(?:try again in|in)\s*([0-9]+(?:\.[0-9]+)?)\s*(?:s|sec|secs|second|seconds)\b`)
-
-func codexEventPayload(line []byte) ([]byte, string, bool) {
-	line = bytes.TrimSpace(line)
-	if !bytes.HasPrefix(line, dataTag) {
-		return nil, "", false
-	}
-	data := bytes.TrimSpace(line[len(dataTag):])
-	if len(data) == 0 || bytes.Equal(data, []byte("[DONE]")) {
-		return nil, "", false
-	}
-	eventType := strings.TrimSpace(gjson.GetBytes(data, "type").String())
-	if eventType == "" {
-		return nil, "", false
-	}
-	return data, eventType, true
-}
-
-func codexEventHeaderType(line []byte) (string, bool) {
-	line = bytes.TrimSpace(line)
-	if !bytes.HasPrefix(line, eventTag) {
-		return "", false
-	}
-	eventType := strings.TrimSpace(string(line[len(eventTag):]))
-	if eventType == "" {
-		return "", false
-	}
-	return eventType, true
-}
-
-func codexTerminalEventType(line []byte) (string, bool) {
-	if _, eventType, ok := codexEventPayload(line); ok {
-		switch eventType {
-		case "response.completed", "response.done":
-			return eventType, true
-		default:
-			return eventType, false
-		}
-	}
-	if eventType, ok := codexEventHeaderType(line); ok {
-		switch eventType {
-		case "response.completed", "response.done":
-			return eventType, true
-		default:
-			return eventType, false
-		}
-	}
-	return "", false
-}
-
-func codexTerminalPayload(line []byte) ([]byte, bool) {
-	data, eventType, ok := codexEventPayload(line)
-	if !ok {
-		return nil, false
-	}
-	switch eventType {
-	case "response.completed", "response.done":
-		return data, true
-	default:
-		return nil, false
-	}
-}
-
-func codexStreamFailure(line []byte) (statusErr, bool) {
-	data, eventType, ok := codexEventPayload(line)
-	if !ok {
-		return statusErr{}, false
-	}
-	switch eventType {
-	case "response.failed":
-		return codexFailedStreamErr(data), true
-	case "response.incomplete":
-		return codexIncompleteStreamErr(data), true
-	default:
-		return statusErr{}, false
-	}
-}
-
-func codexFailedStreamErr(data []byte) statusErr {
-	code := strings.TrimSpace(gjson.GetBytes(data, "response.error.code").String())
-	message := strings.TrimSpace(gjson.GetBytes(data, "response.error.message").String())
-	if message == "" {
-		message = "response.failed event received"
-	}
-
-	errorNode := map[string]any{
-		"message": message,
-	}
-	if code != "" {
-		errorNode["code"] = code
-	}
-
-	for _, key := range []string{
-		"resets_in_seconds",
-		"retry_after_seconds",
-		"retry_in_seconds",
-		"reset_in_seconds",
-		"resets_at",
-		"reset_at",
-		"retry_after_at",
-		"retry_at",
-		"retry_after",
-	} {
-		if v := gjson.GetBytes(data, "response.error."+key); v.Exists() {
-			errorNode[key] = codexJSONValue(v)
-		}
-	}
-
-	payload := map[string]any{
-		"type":    "response.failed",
-		"message": message,
-		"error":   errorNode,
-	}
-
-	msg := message
-	if b, err := json.Marshal(payload); err == nil {
-		msg = string(b)
-	}
-
-	return statusErr{
-		code:       codexStatusFromFailedCode(strings.ToLower(code)),
-		msg:        msg,
-		retryAfter: codexRetryAfterFromFailed(data, message),
-	}
-}
-
-func codexIncompleteStreamErr(data []byte) statusErr {
-	reason := strings.TrimSpace(gjson.GetBytes(data, "response.incomplete_details.reason").String())
-	message := "Incomplete response returned, reason: unknown"
-	if reason != "" {
-		message = "Incomplete response returned, reason: " + reason
-	}
-
-	payload := map[string]any{
-		"type":    "response.incomplete",
-		"message": message,
-		"error": map[string]any{
-			"code":    "response_incomplete",
-			"message": message,
-			"reason":  reason,
-		},
-	}
-	msg := message
-	if b, err := json.Marshal(payload); err == nil {
-		msg = string(b)
-	}
-	return statusErr{code: http.StatusRequestTimeout, msg: msg}
-}
-
-func codexStatusFromFailedCode(code string) int {
-	switch code {
-	case "rate_limit_exceeded", "insufficient_quota", "quota_exceeded", "usage_limit_exceeded":
-		return http.StatusTooManyRequests
-	case "invalid_prompt", "context_length_exceeded", "invalid_request", "invalid_request_error", "bad_request":
-		return http.StatusBadRequest
-	case "workspace_deactivated", "deactivated_workspace", "payment_required":
-		return http.StatusPaymentRequired
-	case "forbidden", "access_denied", "permission_denied":
-		return http.StatusForbidden
-	case "unauthorized", "invalid_api_key", "authentication_error", "token_invalidated", "workspace_unauthorized":
-		return http.StatusUnauthorized
-	case "server_overloaded", "overloaded", "service_unavailable":
-		return http.StatusServiceUnavailable
-	default:
-		return http.StatusBadGateway
-	}
-}
-
-func codexRetryAfterFromFailed(data []byte, message string) *time.Duration {
-	for _, key := range []string{
-		"response.error.resets_in_seconds",
-		"response.error.retry_after_seconds",
-		"response.error.retry_in_seconds",
-		"response.error.reset_in_seconds",
-		"response.error.retry_after",
-	} {
-		if v := gjson.GetBytes(data, key); v.Exists() {
-			if seconds, ok := codexPositiveFloat(v); ok && seconds > 0 {
-				delay := time.Duration(math.Ceil(seconds * float64(time.Second)))
-				return &delay
-			}
-		}
-	}
-
-	for _, key := range []string{
-		"response.error.resets_at",
-		"response.error.reset_at",
-		"response.error.retry_after_at",
-		"response.error.retry_at",
-	} {
-		if v := gjson.GetBytes(data, key); v.Exists() {
-			if ts, ok := codexPositiveFloat(v); ok && ts > 0 {
-				delay := time.Until(time.Unix(int64(ts), 0))
-				if delay > 0 {
-					return &delay
-				}
-			}
-		}
-	}
-
-	matches := codexRetryAfterPattern.FindStringSubmatch(message)
-	if len(matches) > 1 {
-		if seconds, err := strconv.ParseFloat(matches[1], 64); err == nil && seconds > 0 {
-			delay := time.Duration(math.Ceil(seconds * float64(time.Second)))
-			return &delay
-		}
-	}
-	return nil
-}
-
-func codexPositiveFloat(v gjson.Result) (float64, bool) {
-	switch v.Type {
-	case gjson.Number:
-		return v.Float(), true
-	case gjson.String:
-		s := strings.TrimSpace(v.String())
-		if s == "" {
-			return 0, false
-		}
-		value, err := strconv.ParseFloat(s, 64)
-		if err != nil {
-			return 0, false
-		}
-		return value, true
-	default:
-		return 0, false
-	}
-}
-
-func codexJSONValue(v gjson.Result) any {
-	var out any
-	if err := json.Unmarshal([]byte(v.Raw), &out); err == nil {
-		return out
-	}
-	return v.String()
-}
-
-type codexStreamDisconnectInfo struct {
-	cause         string
-	lastEventType string
-	chunksSeen    int
-	sawTerminal   bool
-	sawOutputText bool
-	scannerErr    error
-}
-
-func codexDisconnectedStreamErr(info codexStreamDisconnectInfo) statusErr {
-	cause := strings.TrimSpace(info.cause)
-	if cause == "" {
-		cause = "no_terminal_event"
-	}
-	errNode := map[string]any{
-		"code":              "stream_disconnected_before_completion",
-		"message":           "stream closed before response.completed",
-		"cause":             cause,
-		"saw_terminal":      info.sawTerminal,
-		"last_event_type":   info.lastEventType,
-		"chunks_seen":       info.chunksSeen,
-		"saw_output_text":   info.sawOutputText,
-		"terminal_expected": []string{"response.completed", "response.done"},
-	}
-	if info.scannerErr != nil {
-		errNode["scanner_error"] = info.scannerErr.Error()
-	}
-	payload := map[string]any{
-		"type":    "stream.disconnected",
-		"message": "stream disconnected before completion",
-		"error":   errNode,
-	}
-	msg := "stream error: stream disconnected before completion: stream closed before response.completed"
-	if b, err := json.Marshal(payload); err == nil {
-		msg = string(b)
-	}
-	return statusErr{code: http.StatusRequestTimeout, msg: msg}
-}
 
 // CodexExecutor is a stateless executor for Codex (OpenAI Responses API entrypoint).
 // If api_key is unavailable on auth, it falls back to legacy via ClientAdapter.
@@ -434,7 +152,6 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		}
 	}()
 	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
-	stashUpstreamResponseHeaders(ctx, httpResp.Header)
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		b, _ := io.ReadAll(httpResp.Body)
 		appendAPIResponseChunk(ctx, e.cfg, b)
@@ -450,31 +167,16 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	appendAPIResponseChunk(ctx, e.cfg, data)
 
 	lines := bytes.Split(data, []byte("\n"))
-	var sawTerminal bool
-	var lastEventType string
-	var chunksSeen int
-	var sawOutputText bool
 	for _, line := range lines {
-		chunksSeen++
-		if eventType, terminal := codexTerminalEventType(line); eventType != "" {
-			lastEventType = eventType
-			if terminal {
-				sawTerminal = true
-			}
-		}
-		if _, eventType, ok := codexEventPayload(line); ok {
-			if eventType == "response.output_text.delta" || eventType == "response.output_item.done" {
-				sawOutputText = true
-			}
-		}
-		if streamErr, failed := codexStreamFailure(line); failed {
-			err = streamErr
-			return resp, err
-		}
-		line, ok := codexTerminalPayload(line)
-		if !ok {
+		if !bytes.HasPrefix(line, dataTag) {
 			continue
 		}
+
+		line = bytes.TrimSpace(line[5:])
+		if gjson.GetBytes(line, "type").String() != "response.completed" {
+			continue
+		}
+
 		if detail, ok := parseCodexUsage(line); ok {
 			reporter.publish(ctx, detail)
 		}
@@ -484,17 +186,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		resp = cliproxyexecutor.Response{Payload: []byte(out), Headers: httpResp.Header.Clone()}
 		return resp, nil
 	}
-	if sawTerminal {
-		err = statusErr{code: http.StatusBadGateway, msg: "stream error: terminal event received without terminal payload"}
-		return resp, err
-	}
-	err = codexDisconnectedStreamErr(codexStreamDisconnectInfo{
-		cause:         "no_terminal_event",
-		lastEventType: lastEventType,
-		chunksSeen:    chunksSeen,
-		sawTerminal:   sawTerminal,
-		sawOutputText: sawOutputText,
-	})
+	err = statusErr{code: 408, msg: "stream error: stream disconnected before completion: stream closed before response.completed"}
 	return resp, err
 }
 
@@ -564,7 +256,6 @@ func (e *CodexExecutor) executeCompact(ctx context.Context, auth *cliproxyauth.A
 		}
 	}()
 	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
-	stashUpstreamResponseHeaders(ctx, httpResp.Header)
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		b, _ := io.ReadAll(httpResp.Body)
 		appendAPIResponseChunk(ctx, e.cfg, b)
@@ -656,7 +347,6 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		return nil, err
 	}
 	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
-	stashUpstreamResponseHeaders(ctx, httpResp.Header)
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		data, readErr := io.ReadAll(httpResp.Body)
 		if errClose := httpResp.Body.Close(); errClose != nil {
@@ -682,37 +372,16 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		scanner := bufio.NewScanner(httpResp.Body)
 		scanner.Buffer(nil, 52_428_800) // 50MB
 		var param any
-		sawTerminal := false
-		lastEventType := ""
-		chunksSeen := 0
-		sawOutputText := false
 		for scanner.Scan() {
 			line := scanner.Bytes()
-			chunksSeen++
 			appendAPIResponseChunk(ctx, e.cfg, line)
-			if eventType, terminal := codexTerminalEventType(line); eventType != "" {
-				lastEventType = eventType
-				if terminal {
-					sawTerminal = true
-				}
-			}
-			if _, eventType, ok := codexEventPayload(line); ok {
-				if eventType == "response.output_text.delta" || eventType == "response.output_item.done" {
-					sawOutputText = true
-				}
-			}
 
-			if streamErr, failed := codexStreamFailure(line); failed {
-				recordAPIResponseError(ctx, e.cfg, streamErr)
-				reporter.publishFailure(ctx)
-				out <- cliproxyexecutor.StreamChunk{Err: streamErr}
-				return
-			}
-
-			if data, ok := codexTerminalPayload(line); ok {
-				sawTerminal = true
-				if detail, ok := parseCodexUsage(data); ok {
-					reporter.publish(ctx, detail)
+			if bytes.HasPrefix(line, dataTag) {
+				data := bytes.TrimSpace(line[5:])
+				if gjson.GetBytes(data, "type").String() == "response.completed" {
+					if detail, ok := parseCodexUsage(data); ok {
+						reporter.publish(ctx, detail)
+					}
 				}
 			}
 
@@ -722,33 +391,9 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			}
 		}
 		if errScan := scanner.Err(); errScan != nil {
-			streamErr := codexDisconnectedStreamErr(codexStreamDisconnectInfo{
-				cause:         "scanner_error",
-				lastEventType: lastEventType,
-				chunksSeen:    chunksSeen,
-				sawTerminal:   sawTerminal,
-				sawOutputText: sawOutputText,
-				scannerErr:    errScan,
-			})
-			recordAPIResponseError(ctx, e.cfg, streamErr)
+			recordAPIResponseError(ctx, e.cfg, errScan)
 			reporter.publishFailure(ctx)
-			out <- cliproxyexecutor.StreamChunk{Err: streamErr}
-			return
-		}
-		if ctx != nil && ctx.Err() != nil {
-			return
-		}
-		if !sawTerminal {
-			errDisconnected := codexDisconnectedStreamErr(codexStreamDisconnectInfo{
-				cause:         "no_terminal_event",
-				lastEventType: lastEventType,
-				chunksSeen:    chunksSeen,
-				sawTerminal:   sawTerminal,
-				sawOutputText: sawOutputText,
-			})
-			recordAPIResponseError(ctx, e.cfg, errDisconnected)
-			reporter.publishFailure(ctx)
-			out <- cliproxyexecutor.StreamChunk{Err: errDisconnected}
+			out <- cliproxyexecutor.StreamChunk{Err: errScan}
 		}
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
@@ -996,10 +641,9 @@ func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, s
 		ginHeaders = ginCtx.Request.Header
 	}
 
-	misc.EnsureHeader(r.Header, ginHeaders, "Version", resolveCodexClientVersion(auth))
-	misc.EnsureHeader(r.Header, ginHeaders, "Openai-Beta", "responses=experimental")
+	misc.EnsureHeader(r.Header, ginHeaders, "Version", codexClientVersion)
 	misc.EnsureHeader(r.Header, ginHeaders, "Session_id", uuid.NewString())
-	misc.EnsureHeader(r.Header, ginHeaders, "User-Agent", resolveCodexUserAgent(auth))
+	misc.EnsureHeader(r.Header, ginHeaders, "User-Agent", codexUserAgent)
 
 	if stream {
 		r.Header.Set("Accept", "text/event-stream")
@@ -1027,38 +671,6 @@ func applyCodexHeaders(r *http.Request, auth *cliproxyauth.Auth, token string, s
 		attrs = auth.Attributes
 	}
 	util.ApplyCustomHeadersFromAttrs(r, attrs)
-}
-
-func resolveCodexClientVersion(auth *cliproxyauth.Auth) string {
-	if auth != nil && auth.Attributes != nil {
-		if v := strings.TrimSpace(auth.Attributes["codex_client_version"]); v != "" {
-			return v
-		}
-	}
-	if v := strings.TrimSpace(os.Getenv("CODEX_CLI_VERSION")); v != "" {
-		return v
-	}
-	return defaultCodexClientVersion
-}
-
-func resolveCodexUserAgent(auth *cliproxyauth.Auth) string {
-	if auth != nil && auth.Attributes != nil {
-		if v := strings.TrimSpace(auth.Attributes["user_agent"]); v != "" {
-			return v
-		}
-	}
-	return "codex_cli_rs/" + resolveCodexClientVersion(auth)
-}
-
-func stashUpstreamResponseHeaders(ctx context.Context, headers http.Header) {
-	if ctx == nil || headers == nil {
-		return
-	}
-	ginCtx, _ := ctx.Value("gin").(*gin.Context)
-	if ginCtx == nil {
-		return
-	}
-	ginCtx.Set(upstreamResponseHeadersContext, headers.Clone())
 }
 
 func codexCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
