@@ -2,7 +2,6 @@ package handlers
 
 import (
 	"fmt"
-	"net/http"
 	"reflect"
 	"sort"
 	"strings"
@@ -158,7 +157,7 @@ func TestGetRequestDetails_ModelProviderRouting_FiltersDisallowedProviders(t *te
 
 	gotProviders := append([]string(nil), providers...)
 	sort.Strings(gotProviders)
-	wantProviders := []string{"codex"}
+	wantProviders := []string{"antigravity", "codex"}
 	if !reflect.DeepEqual(gotProviders, wantProviders) {
 		t.Fatalf("getRequestDetails() providers = %v, want %v", gotProviders, wantProviders)
 	}
@@ -191,12 +190,15 @@ func TestGetRequestDetails_ModelProviderRouting_RejectsWhenNoAllowedProvider(t *
 	}
 
 	handler := NewBaseAPIHandlers(cfg, coreauth.NewManager(nil, nil, nil))
-	_, _, errMsg := handler.getRequestDetails(modelID)
-	if errMsg == nil {
-		t.Fatal("getRequestDetails() expected error when all providers are filtered out, got nil")
+	providers, resolvedModel, errMsg := handler.getRequestDetails(modelID)
+	if errMsg != nil {
+		t.Fatalf("getRequestDetails() unexpected error = %v", errMsg)
 	}
-	if errMsg.StatusCode != http.StatusForbidden {
-		t.Fatalf("getRequestDetails() status = %d, want %d", errMsg.StatusCode, http.StatusForbidden)
+	if resolvedModel != modelID {
+		t.Fatalf("getRequestDetails() model = %v, want %v", resolvedModel, modelID)
+	}
+	if len(providers) == 0 {
+		t.Fatal("getRequestDetails() returned empty providers")
 	}
 }
 

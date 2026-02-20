@@ -31,13 +31,13 @@ func (e *claudeErrorPathExecutor) Execute(context.Context, *coreauth.Auth, coree
 	return coreexecutor.Response{Payload: []byte(`{"ok":true}`)}, nil
 }
 
-func (e *claudeErrorPathExecutor) ExecuteStream(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (<-chan coreexecutor.StreamChunk, error) {
+func (e *claudeErrorPathExecutor) ExecuteStream(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (*coreexecutor.StreamResult, error) {
 	ch := make(chan coreexecutor.StreamChunk, 1)
 	if e.streamErr != nil {
 		ch <- coreexecutor.StreamChunk{Err: e.streamErr}
 	}
 	close(ch)
-	return ch, nil
+	return &coreexecutor.StreamResult{Chunks: ch}, nil
 }
 
 func (e *claudeErrorPathExecutor) Refresh(ctx context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
@@ -156,4 +156,3 @@ func TestClaudeMessages_NonStreamingError_UsesMappedJSONResponse(t *testing.T) {
 		t.Fatalf("body missing mapped message, body=%s", body)
 	}
 }
-

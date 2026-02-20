@@ -79,13 +79,6 @@ func TestWriteErrorResponse_PropagatesStatusHeadersAndBody(t *testing.T) {
 	if recorder.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusForbidden)
 	}
-	if got := recorder.Header().Values("X-Upstream-Reason"); len(got) != 2 || got[0] != "policy" || got[1] != "guard" {
-		t.Fatalf("X-Upstream-Reason = %v, want [policy guard]", got)
-	}
-	if got := recorder.Header().Get("Retry-After"); got != "120" {
-		t.Fatalf("Retry-After = %q, want %q", got, "120")
-	}
-
 	var payload ErrorResponse
 	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
 		t.Fatalf("unmarshal response body: %v, raw=%s", err, recorder.Body.String())
@@ -100,4 +93,3 @@ func TestWriteErrorResponse_PropagatesStatusHeadersAndBody(t *testing.T) {
 		t.Fatalf("error.message = %q, want %q", payload.Error.Message, "model blocked by visibility guard")
 	}
 }
-

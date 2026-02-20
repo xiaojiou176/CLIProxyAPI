@@ -32,13 +32,13 @@ func (e *geminiErrorPathExecutor) Execute(context.Context, *coreauth.Auth, coree
 	return coreexecutor.Response{Payload: []byte(`{"ok":true}`)}, nil
 }
 
-func (e *geminiErrorPathExecutor) ExecuteStream(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (<-chan coreexecutor.StreamChunk, error) {
+func (e *geminiErrorPathExecutor) ExecuteStream(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (*coreexecutor.StreamResult, error) {
 	ch := make(chan coreexecutor.StreamChunk, 1)
 	if e.streamErr != nil {
 		ch <- coreexecutor.StreamChunk{Err: e.streamErr}
 	}
 	close(ch)
-	return ch, nil
+	return &coreexecutor.StreamResult{Chunks: ch}, nil
 }
 
 func (e *geminiErrorPathExecutor) Refresh(ctx context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {
@@ -160,4 +160,3 @@ func TestGeminiHandler_CountTokensError_UsesMappedJSONResponse(t *testing.T) {
 		t.Fatalf("body missing mapped message, body=%s", body)
 	}
 }
-

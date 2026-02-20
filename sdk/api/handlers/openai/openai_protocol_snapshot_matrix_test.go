@@ -29,13 +29,13 @@ func (e *openAIProtocolMatrixExecutor) Execute(context.Context, *coreauth.Auth, 
 	return coreexecutor.Response{Payload: []byte(`{"ok":true}`)}, nil
 }
 
-func (e *openAIProtocolMatrixExecutor) ExecuteStream(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (<-chan coreexecutor.StreamChunk, error) {
+func (e *openAIProtocolMatrixExecutor) ExecuteStream(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (*coreexecutor.StreamResult, error) {
 	ch := make(chan coreexecutor.StreamChunk, 1)
 	if e.streamErr != nil {
 		ch <- coreexecutor.StreamChunk{Err: e.streamErr}
 	}
 	close(ch)
-	return ch, nil
+	return &coreexecutor.StreamResult{Chunks: ch}, nil
 }
 
 func (e *openAIProtocolMatrixExecutor) Refresh(ctx context.Context, auth *coreauth.Auth) (*coreauth.Auth, error) {

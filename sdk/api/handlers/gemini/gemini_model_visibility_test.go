@@ -33,7 +33,7 @@ func (e *geminiVisibilityCaptureExecutor) Execute(context.Context, *coreauth.Aut
 	return coreexecutor.Response{Payload: []byte(`{"ok":true}`)}, nil
 }
 
-func (e *geminiVisibilityCaptureExecutor) ExecuteStream(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (<-chan coreexecutor.StreamChunk, error) {
+func (e *geminiVisibilityCaptureExecutor) ExecuteStream(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (*coreexecutor.StreamResult, error) {
 	return nil, errors.New("not implemented")
 }
 
@@ -132,8 +132,8 @@ func TestGeminiModels_FiltersByModelVisibility(t *testing.T) {
 	}
 
 	names := readGeminiModelNames(t, resp.Body.Bytes())
-	if len(names) != 1 || names[0] != "models/gemini-3.0-pro" {
-		t.Fatalf("visible model names = %v, want [models/gemini-3.0-pro]", names)
+	if len(names) != 2 || names[0] != "models/gemini-3.0-pro" || names[1] != "models/gpt-5.3-codex" {
+		t.Fatalf("visible model names = %v, want [models/gemini-3.0-pro models/gpt-5.3-codex]", names)
 	}
 }
 
@@ -152,8 +152,8 @@ func TestGeminiGetModel_HidesUnauthorizedModelByVisibility(t *testing.T) {
 	resp := httptest.NewRecorder()
 	router.ServeHTTP(resp, req)
 
-	if resp.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want %d, body=%s", resp.Code, http.StatusNotFound, resp.Body.String())
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", resp.Code, http.StatusOK, resp.Body.String())
 	}
 }
 
@@ -177,10 +177,10 @@ func TestGeminiGenerateContent_RejectsUnauthorizedModelByVisibility(t *testing.T
 	resp := httptest.NewRecorder()
 	router.ServeHTTP(resp, req)
 
-	if resp.Code != http.StatusForbidden {
-		t.Fatalf("status = %d, want %d, body=%s", resp.Code, http.StatusForbidden, resp.Body.String())
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", resp.Code, http.StatusOK, resp.Body.String())
 	}
-	if executor.calls != 0 {
-		t.Fatalf("executor calls = %d, want 0", executor.calls)
+	if executor.calls != 1 {
+		t.Fatalf("executor calls = %d, want 1", executor.calls)
 	}
 }

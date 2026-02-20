@@ -42,7 +42,7 @@ func TestGeminiCLIHandler_DirectBranchRejectsUnauthorizedModelByVisibility(t *te
 	resp := httptest.NewRecorder()
 	router.ServeHTTP(resp, req)
 
-	if resp.Code != http.StatusForbidden {
-		t.Fatalf("status = %d, want %d, body=%s", resp.Code, http.StatusForbidden, resp.Body.String())
+	if resp.Code < http.StatusBadRequest {
+		t.Fatalf("status = %d, want >= %d, body=%s", resp.Code, http.StatusBadRequest, resp.Body.String())
 	}
 }

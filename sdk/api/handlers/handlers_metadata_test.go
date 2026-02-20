@@ -10,33 +10,34 @@ import (
 	"golang.org/x/net/context"
 )
 
-func TestRequestExecutionMetadata_UsesHeaderSessionKey(t *testing.T) {
+func TestRequestExecutionMetadata_UsesIdempotencyHeader(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	rec := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(rec)
 	req := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
-	req.Header.Set("x-session-id", "session-header-1")
 	req.Header.Set("Idempotency-Key", "idem-1")
 	c.Request = req
 
 	ctx := context.WithValue(context.Background(), "gin", c)
-	meta := requestExecutionMetadata(ctx, []byte(`{"model":"gpt-5.3-codex"}`))
+	meta := requestExecutionMetadata(ctx)
 
 	if got := meta[idempotencyKeyMetadataKey]; got != "idem-1" {
 		t.Fatalf("idempotency metadata = %v, want %q", got, "idem-1")
 	}
-	if got := meta[coreexecutor.SessionAffinityKeyMetadataKey]; got != "session-header-1" {
-		t.Fatalf("session affinity metadata = %v, want %q", got, "session-header-1")
+}
+
+func TestRequestExecutionMetadata_UsesGeneratedIdempotencyFallback(t *testing.T) {
+	meta := requestExecutionMetadata(context.Background())
+	if got, ok := meta[idempotencyKeyMetadataKey]; !ok || got == "" {
+		t.Fatalf("idempotency metadata missing")
 	}
 }
 
-func TestRequestExecutionMetadata_UsesPayloadSessionKeyFallback(t *testing.T) {
-	meta := requestExecutionMetadata(context.Background(), []byte(`{"model":"gpt-5.3-codex","previous_response_id":"resp-abc"}`))
+func TestRequestExecutionMetadata_IncludesExecutionSessionID(t *testing.T) {
+	ctx := WithExecutionSessionID(context.Background(), "session-abc")
+	meta := requestExecutionMetadata(ctx)
 
-	if got := meta[coreexecutor.SessionAffinityKeyMetadataKey]; got != "resp-abc" {
-		t.Fatalf("session affinity metadata = %v, want %q", got, "resp-abc")
-	}
-	if got, ok := meta[idempotencyKeyMetadataKey]; !ok || got == "" {
-		t.Fatalf("idempotency metadata missing")
+	if got := meta[coreexecutor.ExecutionSessionMetadataKey]; got != "session-abc" {
+		t.Fatalf("execution session metadata = %v, want %q", got, "session-abc")
 	}
 }

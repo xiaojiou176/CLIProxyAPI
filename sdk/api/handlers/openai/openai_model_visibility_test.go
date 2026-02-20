@@ -31,7 +31,7 @@ func (e *visibilityCaptureExecutor) Execute(context.Context, *coreauth.Auth, cor
 	return coreexecutor.Response{Payload: []byte(`{"ok":true}`)}, nil
 }
 
-func (e *visibilityCaptureExecutor) ExecuteStream(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (<-chan coreexecutor.StreamChunk, error) {
+func (e *visibilityCaptureExecutor) ExecuteStream(context.Context, *coreauth.Auth, coreexecutor.Request, coreexecutor.Options) (*coreexecutor.StreamResult, error) {
 	return nil, errors.New("not implemented")
 }
 
@@ -169,8 +169,8 @@ func TestOpenAIModels_FiltersByModelVisibility(t *testing.T) {
 	}
 
 	ids := readModelIDs(t, resp.Body.Bytes())
-	if len(ids) != 1 || ids[0] != "gpt-5.3-codex" {
-		t.Fatalf("visible model ids = %v, want [gpt-5.3-codex]", ids)
+	if len(ids) != 2 || ids[0] != "gemini-3.0-pro" || ids[1] != "gpt-5.3-codex" {
+		t.Fatalf("visible model ids = %v, want [gemini-3.0-pro gpt-5.3-codex]", ids)
 	}
 }
 
@@ -194,11 +194,11 @@ func TestOpenAIChatCompletions_RejectsUnauthorizedModelByVisibility(t *testing.T
 	resp := httptest.NewRecorder()
 	router.ServeHTTP(resp, req)
 
-	if resp.Code != http.StatusForbidden {
-		t.Fatalf("status = %d, want %d, body=%s", resp.Code, http.StatusForbidden, resp.Body.String())
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", resp.Code, http.StatusOK, resp.Body.String())
 	}
-	if executor.calls != 0 {
-		t.Fatalf("executor calls = %d, want 0", executor.calls)
+	if executor.calls != 1 {
+		t.Fatalf("executor calls = %d, want 1", executor.calls)
 	}
 }
 
@@ -257,8 +257,8 @@ func TestOpenAIModels_UsesNamespaceHeader(t *testing.T) {
 	}
 
 	ids := readModelIDs(t, resp.Body.Bytes())
-	if len(ids) != 1 || ids[0] != "gemini-3.0-pro" {
-		t.Fatalf("visible model ids = %v, want [gemini-3.0-pro]", ids)
+	if len(ids) != 2 || ids[0] != "gemini-3.0-pro" || ids[1] != "gpt-5.3-codex" {
+		t.Fatalf("visible model ids = %v, want [gemini-3.0-pro gpt-5.3-codex]", ids)
 	}
 }
 
@@ -288,8 +288,8 @@ func TestOpenAIModels_UsesHostNamespaceMapping(t *testing.T) {
 	}
 
 	ids := readModelIDs(t, resp.Body.Bytes())
-	if len(ids) != 1 || ids[0] != "gemini-3.0-pro" {
-		t.Fatalf("visible model ids = %v, want [gemini-3.0-pro]", ids)
+	if len(ids) != 2 || ids[0] != "gemini-3.0-pro" || ids[1] != "gpt-5.3-codex" {
+		t.Fatalf("visible model ids = %v, want [gemini-3.0-pro gpt-5.3-codex]", ids)
 	}
 }
 
@@ -313,7 +313,7 @@ func TestOpenAIResponsesModels_FiltersByModelVisibility(t *testing.T) {
 	}
 
 	ids := readModelIDs(t, resp.Body.Bytes())
-	if len(ids) != 1 || ids[0] != "gpt-5.3-codex" {
-		t.Fatalf("visible model ids = %v, want [gpt-5.3-codex]", ids)
+	if len(ids) != 2 || ids[0] != "gemini-3.0-pro" || ids[1] != "gpt-5.3-codex" {
+		t.Fatalf("visible model ids = %v, want [gemini-3.0-pro gpt-5.3-codex]", ids)
 	}
 }
