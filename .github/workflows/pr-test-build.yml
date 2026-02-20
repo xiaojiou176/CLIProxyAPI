@@ -9,7 +9,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -22,5 +22,17 @@ jobs:
         run: |
           go build -o test-output ./cmd/server
           rm -f test-output
-      - name: Test
-        run: go test ./...
+      - name: Vet
+        run: go vet ./...
+      - name: Staticcheck
+        run: |
+          go install honnef.co/go/tools/cmd/staticcheck@latest
+          staticcheck ./...
+      - name: Test (race)
+        run: go test -race ./...
+      - name: Test (coverage)
+        run: |
+          go test -coverprofile=coverage.out ./...
+          total="$(go tool cover -func=coverage.out | awk '/^total:/{gsub("%","",$3); print $3}')"
+          echo "total coverage: ${total}%"
+          awk -v c="${total}" 'BEGIN { if (c+0 < 60) { printf("coverage %.2f%% < 60%%\n", c+0); exit 1 } }'
