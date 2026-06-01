@@ -2,10 +2,10 @@ package responses
 
 import (
 	"encoding/base64"
-	"testing"
 	sigcompat "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
 	"github.com/tidwall/gjson"
 	"google.golang.org/protobuf/encoding/protowire"
+	"testing"
 )
 
 func TestConvertOpenAIResponsesRequestToClaude_KeepsBuiltinWebSearchForKiro(t *testing.T) {
@@ -305,4 +305,47 @@ func testGPTResponsesReasoningSignature() string {
 		payload[i] = byte(i)
 	}
 	return base64.URLEncoding.EncodeToString(payload)
+}
+
+// Merge regression: reasoning + parallel tool_use must keep reasoning attached
+// to the assistant message and not leak/duplicate across the parallel calls.
+func TestConvertOpenAIResponsesRequestToClaude_ReasoningWithParallelToolUse(t *testing.T) {
+	rawSignature, _ := testClaudeResponsesThinkingSignature(t)
+	raw := []byte(`{
+		"model":"claude-test",
+		"input":[
+			{"type":"reasoning","encrypted_content":"` + rawSignature + `","summary":[{"type":"summary_text","text":"plan"}]},
+			{"type":"function_call","call_id":"c1","name":"exec_command","arguments":"{}"},
+			{"type":"function_call","call_id":"c2","name":"read_file","arguments":"{}"}
+		]
+	}`)
+	out := ConvertOpenAIResponsesRequestToClaude("claude-test", raw, false)
+	// thinking blocks across whole output must be exactly 1 (no leak/dup)
+	n := 0
+	gjson.GetBytes(out, "messages").ForEach(func(_, msg gjson.Result) bool {
+		msg.Get("content").ForEach(func(_, c gjson.Result) bool {
+			if c.Get("type").String() == "thinking" {
+				n++
+			}
+			return true
+		})
+		return true
+	})
+	if n != 1 {
+		t.Fatalf("expected exactly 1 thinking block (reasoning not lost/duplicated), got %d; out=%s", n, string(out))
+	}
+	// both tool_use must survive
+	tu := 0
+	gjson.GetBytes(out, "messages").ForEach(func(_, msg gjson.Result) bool {
+		msg.Get("content").ForEach(func(_, c gjson.Result) bool {
+			if c.Get("type").String() == "tool_use" {
+				tu++
+			}
+			return true
+		})
+		return true
+	})
+	if tu != 2 {
+		t.Fatalf("expected 2 tool_use (parallel merge), got %d; out=%s", tu, string(out))
+	}
 }
