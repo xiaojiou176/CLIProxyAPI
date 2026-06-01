@@ -57,6 +57,7 @@ func TestConvertGeminiResponseToOpenAIResponses_UnwrapAndAggregateText(t *testin
 		cachedTokens int64
 
 		funcName string
+		funcNamespace string
 		funcArgs string
 
 		posTextDone    = -1
@@ -89,6 +90,7 @@ func TestConvertGeminiResponseToOpenAIResponses_UnwrapAndAggregateText(t *testin
 			case "function_call":
 				gotFuncDone = true
 				funcName = data.Get("item.name").String()
+				funcNamespace = data.Get("item.namespace").String()
 				funcArgs = data.Get("item.arguments").String()
 			}
 		case "response.output_item.added":
@@ -139,8 +141,14 @@ func TestConvertGeminiResponseToOpenAIResponses_UnwrapAndAggregateText(t *testin
 		t.Fatalf("unexpected cached token count: got %d", cachedTokens)
 	}
 
-	if funcName != "mcp__serena__list_dir" {
+	// After MCP tool-name split, the flat "mcp__serena__list_dir" is emitted as
+	// leaf name "list_dir" plus namespace "mcp__serena" so the Codex tool
+	// registry can dispatch the call.
+	if funcName != "list_dir" {
 		t.Fatalf("unexpected function name: got %q", funcName)
+	}
+	if funcNamespace != "mcp__serena" {
+		t.Fatalf("unexpected function namespace: got %q", funcNamespace)
 	}
 	if !gjson.Valid(funcArgs) {
 		t.Fatalf("invalid function arguments JSON: %q", funcArgs)

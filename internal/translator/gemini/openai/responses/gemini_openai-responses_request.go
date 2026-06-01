@@ -6,6 +6,7 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/translator/gemini/common"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -118,7 +119,7 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 
 			switch itemType {
 			case "message":
-				if strings.EqualFold(itemRole, "system") {
+				if strings.EqualFold(itemRole, "system") || strings.EqualFold(itemRole, "developer") {
 					if contentArray := item.Get("content"); contentArray.Exists() {
 						systemInstr := []byte(`{"parts":[]}`)
 						if systemInstructionResult := gjson.GetBytes(out, "systemInstruction"); systemInstructionResult.Exists() {
@@ -179,8 +180,15 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 							switch strings.ToLower(itemRole) {
 							case "assistant", "model":
 								effRole = "model"
+							case "user", "human":
+								effRole = "user"
 							default:
-								effRole = strings.ToLower(itemRole)
+								// Vertex Gemini only accepts "user" or "model"
+								// for contents[].role. Coerce any other role
+								// (developer/tool/system fragments that slip
+								// past the case "message" branch) back to
+								// "user" instead of passing through verbatim.
+								effRole = "user"
 							}
 						}
 						if contentType == "output_text" {
@@ -279,8 +287,11 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 						switch strings.ToLower(itemRole) {
 						case "assistant", "model":
 							effRole = "model"
+						case "user", "human":
+							effRole = "user"
 						default:
-							effRole = strings.ToLower(itemRole)
+							// Vertex Gemini only accepts "user" or "model".
+							effRole = "user"
 						}
 					}
 
@@ -373,20 +384,22 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 		geminiTools := []byte(`[{"functionDeclarations":[]}]`)
 
 		tools.ForEach(func(_, tool gjson.Result) bool {
-			if tool.Get("type").String() == "function" {
-				funcDecl := []byte(`{"name":"","description":"","parametersJsonSchema":{}}`)
-
-				if name := tool.Get("name"); name.Exists() {
-					funcDecl, _ = sjson.SetBytes(funcDecl, "name", util.SanitizeFunctionName(name.String()))
-				}
-				if desc := tool.Get("description"); desc.Exists() {
-					funcDecl, _ = sjson.SetBytes(funcDecl, "description", desc.String())
-				}
-				if params := tool.Get("parameters"); params.Exists() {
-					funcDecl, _ = sjson.SetRawBytes(funcDecl, "parametersJsonSchema", []byte(params.Raw))
-				}
-
+			switch tool.Get("type").String() {
+			case "function":
+				funcDecl := buildGeminiResponsesFunctionDeclaration(tool, "")
 				geminiTools, _ = sjson.SetRawBytes(geminiTools, "0.functionDeclarations.-1", funcDecl)
+			case "namespace":
+				namespaceName := strings.TrimSpace(tool.Get("name").String())
+				if children := tool.Get("tools"); children.IsArray() {
+					children.ForEach(func(_, child gjson.Result) bool {
+						qualified := qualifyGeminiNamespaceToolName(namespaceName, responsesToolName(child))
+						funcDecl := buildGeminiResponsesFunctionDeclaration(child, qualified)
+						geminiTools, _ = sjson.SetRawBytes(geminiTools, "0.functionDeclarations.-1", funcDecl)
+						return true
+					})
+				}
+			default:
+				log.Debugf("gemini openai responses: dropping unsupported tool type %q name %q (cannot map to functionDeclarations)", tool.Get("type").String(), tool.Get("name").String())
 			}
 			return true
 		})
@@ -453,4 +466,49 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 	result := out
 	result = common.AttachDefaultSafetySettings(result, "safetySettings")
 	return result
+}
+
+// buildGeminiResponsesFunctionDeclaration builds a single Gemini
+// functionDeclaration from an OpenAI Responses function tool. When overrideName
+// is non-empty it is used as the declaration name (e.g. a namespace-qualified
+// name for flattened children); otherwise the tool's own name is used.
+func buildGeminiResponsesFunctionDeclaration(tool gjson.Result, overrideName string) []byte {
+	funcDecl := []byte(`{"name":"","description":"","parametersJsonSchema":{}}`)
+
+	name := overrideName
+	if name == "" {
+		name = tool.Get("name").String()
+	}
+	funcDecl, _ = sjson.SetBytes(funcDecl, "name", util.SanitizeFunctionName(name))
+	if desc := tool.Get("description"); desc.Exists() {
+		funcDecl, _ = sjson.SetBytes(funcDecl, "description", desc.String())
+	}
+	if params := tool.Get("parameters"); params.Exists() {
+		funcDecl, _ = sjson.SetRawBytes(funcDecl, "parametersJsonSchema", []byte(params.Raw))
+	}
+	return funcDecl
+}
+
+// responsesToolName returns the tool name from either "name" or "function.name".
+func responsesToolName(tool gjson.Result) string {
+	if name := strings.TrimSpace(tool.Get("name").String()); name != "" {
+		return name
+	}
+	return strings.TrimSpace(tool.Get("function.name").String())
+}
+
+// qualifyGeminiNamespaceToolName mirrors the Claude lane's namespace-qualified
+// naming so flattened children keep a stable namespace__child identity.
+func qualifyGeminiNamespaceToolName(namespaceName, childName string) string {
+	childName = strings.TrimSpace(childName)
+	if childName == "" || namespaceName == "" || strings.HasPrefix(childName, "mcp__") {
+		return childName
+	}
+	if strings.HasPrefix(childName, namespaceName) {
+		return childName
+	}
+	if strings.HasSuffix(namespaceName, "__") {
+		return namespaceName + childName
+	}
+	return namespaceName + "__" + childName
 }

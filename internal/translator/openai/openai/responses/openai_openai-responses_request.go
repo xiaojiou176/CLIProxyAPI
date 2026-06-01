@@ -72,6 +72,15 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 
 		pendingToolCalls := make([]interface{}, 0)
 		pendingToolCallIDs := make([]string, 0)
+		// pendingReasoning carries the most recently seen Codex reasoning item
+		// so it can be attached to the next assistant message we emit. This
+		// is required by DeepSeek's deepseek-reasoner / V4-pro family: when
+		// resending the multi-turn history, every assistant message must keep
+		// its reasoning_content field, otherwise DeepSeek returns 400
+		// "The `reasoning_content` in the thinking mode must be passed back
+		// to the API." OpenAI's own Chat Completions endpoint silently
+		// ignores the extra field, so this is safe to emit unconditionally.
+		var pendingReasoning string
 		awaitingToolOutputs := make(map[string]struct{})
 		deferredMessages := make([][]byte, 0)
 
@@ -81,6 +90,10 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 			}
 			assistantMessage := []byte(`{"role":"assistant","tool_calls":[]}`)
 			assistantMessage, _ = sjson.SetBytes(assistantMessage, "tool_calls", pendingToolCalls)
+			if pendingReasoning != "" {
+				assistantMessage, _ = sjson.SetBytes(assistantMessage, "reasoning_content", pendingReasoning)
+				pendingReasoning = ""
+			}
 			out, _ = sjson.SetRawBytes(out, "messages.-1", assistantMessage)
 			for _, id := range pendingToolCallIDs {
 				if strings.TrimSpace(id) == "" {
@@ -170,6 +183,10 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 					message, _ = sjson.SetBytes(message, "content", content.String())
 				}
 
+				if role == "assistant" && pendingReasoning != "" {
+					message, _ = sjson.SetBytes(message, "reasoning_content", pendingReasoning)
+					pendingReasoning = ""
+				}
 				appendRegularMessage(message)
 
 			case "function_call":
@@ -213,6 +230,31 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 				if len(awaitingToolOutputs) == 0 && len(deferredMessages) > 0 {
 					flushDeferredMessages()
 				}
+
+			case "reasoning":
+				// Capture the reasoning content emitted by Codex so the next
+				// assistant message can carry it as reasoning_content. We try
+				// encrypted_content first (preserves the model's exact thinking
+				// payload), then fall back to summary[*].text for older Codex
+				// versions that emit redacted summaries.
+				var captured string
+				if enc := item.Get("encrypted_content"); enc.Exists() && enc.String() != "" {
+					captured = enc.String()
+				} else if summary := item.Get("summary"); summary.Exists() && summary.IsArray() {
+					var parts []string
+					summary.ForEach(func(_, s gjson.Result) bool {
+						if t := strings.TrimSpace(s.Get("text").String()); t != "" {
+							parts = append(parts, t)
+						}
+						return true
+					})
+					if len(parts) > 0 {
+						captured = strings.Join(parts, "\n\n")
+					}
+				}
+				if captured != "" {
+					pendingReasoning = captured
+				}
 			}
 
 		}
@@ -229,37 +271,59 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 	if tools := root.Get("tools"); tools.Exists() && tools.IsArray() {
 		var chatCompletionsTools []interface{}
 
-		tools.ForEach(func(_, tool gjson.Result) bool {
-			// Built-in tools (e.g. {"type":"web_search"}) are already compatible with the Chat Completions schema.
-			// Only function tools need structural conversion because Chat Completions nests details under "function".
-			toolType := tool.Get("type").String()
-			if toolType != "" && toolType != "function" && tool.IsObject() {
-				// Almost all providers lack built-in tools, so we just ignore them.
-				// chatCompletionsTools = append(chatCompletionsTools, tool.Value())
-				return true
-			}
-
+		// buildChatTool converts a single responses-format function tool into a
+		// chat-completions function tool. overrideName, when non-empty, is used
+		// as the function name (for namespace-qualified flattened children).
+		buildChatTool := func(tool gjson.Result, overrideName string) []byte {
 			chatTool := []byte(`{"type":"function","function":{}}`)
-
-			// Convert tool structure from responses format to chat completions format
 			function := []byte(`{"name":"","description":"","parameters":{}}`)
-
-			if name := tool.Get("name"); name.Exists() {
+			if overrideName != "" {
+				function, _ = sjson.SetBytes(function, "name", overrideName)
+			} else if name := tool.Get("name"); name.Exists() {
 				function, _ = sjson.SetBytes(function, "name", name.String())
 			}
-
 			if description := tool.Get("description"); description.Exists() {
 				function, _ = sjson.SetBytes(function, "description", description.String())
 			}
-
 			if parameters := tool.Get("parameters"); parameters.Exists() {
 				function, _ = sjson.SetRawBytes(function, "parameters", []byte(parameters.Raw))
 			}
-
 			chatTool, _ = sjson.SetRawBytes(chatTool, "function", function)
-			chatCompletionsTools = append(chatCompletionsTools, gjson.ParseBytes(chatTool).Value())
+			return chatTool
+		}
 
-			return true
+		tools.ForEach(func(_, tool gjson.Result) bool {
+			// Built-in tools (e.g. {"type":"web_search"}) are already compatible with the Chat Completions schema.
+			toolType := tool.Get("type").String()
+			switch toolType {
+			case "namespace":
+				// Codex sends namespaced tools (e.g. mcp__SERVER, multi_agent_v1,
+				// codex_app) whose child functions must be flattened into
+				// individual chat-completions function tools, joining the
+				// namespace and child name with "__". Without this, every MCP /
+				// agent / app tool is silently dropped on this lane.
+				namespaceName := strings.TrimSpace(tool.Get("name").String())
+				if children := tool.Get("tools"); children.IsArray() {
+					children.ForEach(func(_, child gjson.Result) bool {
+						childName := strings.TrimSpace(child.Get("name").String())
+						qualified := childName
+						if namespaceName != "" && childName != "" && !strings.HasPrefix(childName, namespaceName) {
+							qualified = namespaceName + "__" + childName
+						}
+						chatTool := buildChatTool(child, qualified)
+						chatCompletionsTools = append(chatCompletionsTools, gjson.ParseBytes(chatTool).Value())
+						return true
+					})
+				}
+				return true
+			case "function", "":
+				chatTool := buildChatTool(tool, "")
+				chatCompletionsTools = append(chatCompletionsTools, gjson.ParseBytes(chatTool).Value())
+				return true
+			default:
+				// Other built-in tool types lack a chat-completions equivalent; skip.
+				return true
+			}
 		})
 
 		if len(chatCompletionsTools) > 0 {

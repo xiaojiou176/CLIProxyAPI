@@ -339,6 +339,7 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 				item, _ = sjson.SetBytes(item, "item.id", fmt.Sprintf("fc_%s", st.FuncCallIDs[idx]))
 				item, _ = sjson.SetBytes(item, "item.call_id", st.FuncCallIDs[idx])
 				item, _ = sjson.SetBytes(item, "item.name", name)
+				item = translatorcommon.SetMcpToolNameOnItem(item, "item", name)
 				out = append(out, emitEvent("response.output_item.added", item))
 
 				// Emit arguments delta (full args in one chunk).
@@ -368,6 +369,7 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 					itemDone, _ = sjson.SetBytes(itemDone, "item.arguments", argsJSON)
 					itemDone, _ = sjson.SetBytes(itemDone, "item.call_id", st.FuncCallIDs[idx])
 					itemDone, _ = sjson.SetBytes(itemDone, "item.name", st.FuncNames[idx])
+					itemDone = translatorcommon.SetMcpToolNameOnItem(itemDone, "item", st.FuncNames[idx])
 					out = append(out, emitEvent("response.output_item.done", itemDone))
 
 					st.FuncDone[idx] = true
@@ -422,6 +424,7 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 				itemDone, _ = sjson.SetBytes(itemDone, "item.arguments", args)
 				itemDone, _ = sjson.SetBytes(itemDone, "item.call_id", st.FuncCallIDs[idx])
 				itemDone, _ = sjson.SetBytes(itemDone, "item.name", st.FuncNames[idx])
+				itemDone = translatorcommon.SetMcpToolNameOnItem(itemDone, "item", st.FuncNames[idx])
 				out = append(out, emitEvent("response.output_item.done", itemDone))
 
 				st.FuncDone[idx] = true
@@ -529,6 +532,7 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 				item, _ = sjson.SetBytes(item, "arguments", args)
 				item, _ = sjson.SetBytes(item, "call_id", callID)
 				item, _ = sjson.SetBytes(item, "name", st.FuncNames[idx])
+				item = translatorcommon.SetMcpToolNameOnItem(item, "", st.FuncNames[idx])
 				outputsWrapper, _ = sjson.SetRawBytes(outputsWrapper, "arr.-1", item)
 			}
 		}
@@ -708,6 +712,7 @@ func ConvertGeminiResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 				itemJSON, _ = sjson.SetBytes(itemJSON, "id", fmt.Sprintf("fc_%s", callID))
 				itemJSON, _ = sjson.SetBytes(itemJSON, "call_id", callID)
 				itemJSON, _ = sjson.SetBytes(itemJSON, "name", name)
+				itemJSON = translatorcommon.SetMcpToolNameOnItem(itemJSON, "", name)
 				argsStr := ""
 				if args.Exists() {
 					argsStr = args.Raw

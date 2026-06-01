@@ -44,6 +44,21 @@ type SDKConfig struct {
 	// NonStreamKeepAliveInterval controls how often blank lines are emitted for non-streaming responses.
 	// <= 0 disables keep-alives. Value is in seconds.
 	NonStreamKeepAliveInterval int `yaml:"nonstream-keepalive-interval,omitempty" json:"nonstream-keepalive-interval,omitempty"`
+
+	// CompactFallbackModel enables cross-model fallback for the /v1/responses/compact endpoint.
+	//
+	// Background: Codex App locally triggers context compaction when its conversation
+	// approaches the model auto-compact token limit, then POSTs to /v1/responses/compact
+	// to obtain a server-side summary. Only the OpenAI/Codex executor implements this
+	// endpoint upstream; the Claude, Gemini, OpenAI-compat and other executors return
+	// 501 Not Implemented. When that happens we transparently rewrite the model in the
+	// request payload to this fallback model (which must route to an executor that
+	// supports compact, e.g. gpt-5.4 -> codex_executor) and retry once.
+	//
+	// Empty string (default) disables the fallback and preserves the upstream 501
+	// behaviour. The env var CPA_COMPACT_FALLBACK_MODEL overrides this YAML value
+	// without requiring a config reload.
+	CompactFallbackModel string `yaml:"compact-fallback-model,omitempty" json:"compact-fallback-model,omitempty"`
 }
 
 // StreamingConfig holds server streaming behavior configuration.

@@ -38,9 +38,61 @@ type claudeToResponsesState struct {
 	InputTokens  int64
 	OutputTokens int64
 	UsageSeen    bool
+	// web_search aggregation (server_tool_use + web_search_tool_result)
+	WebSearchID      string
+	WebSearchQuery   string
+	WebSearchItems   [][]byte // completed web_search_call items for output aggregation
 }
 
 var dataTag = []byte("data:")
+
+// webSearchToolName is the Anthropic server_tool_use name CPA translates into an
+// OpenAI Responses web_search_call item.
+const webSearchToolName = "web_search"
+
+// buildWebSearchCallItem builds an OpenAI Responses web_search_call output item.
+// The host (codex) parses {id?, status?, action:{type:"search",query,queries}};
+// it ignores unknown fields, so search results are attached under "result" to
+// preserve title/url/encrypted_content/page_age without breaking deserialization.
+func buildWebSearchCallItem(id, query, status string, results []byte) []byte {
+	item := []byte(`{"id":"","type":"web_search_call","status":"","action":{"type":"search"}}`)
+	if id != "" {
+		item, _ = sjson.SetBytes(item, "id", fmt.Sprintf("ws_%s", id))
+	}
+	item, _ = sjson.SetBytes(item, "status", status)
+	if query != "" {
+		item, _ = sjson.SetBytes(item, "action.query", query)
+		item, _ = sjson.SetBytes(item, "action.queries.-1", query)
+	}
+	if len(results) > 0 {
+		item, _ = sjson.SetRawBytes(item, "result", results)
+	}
+	return item
+}
+
+// buildWebSearchResultArray maps Anthropic web_search_result entries into a JSON
+// array, preserving title/url/encrypted_content/page_age (no native OpenAI slot,
+// so kept verbatim under the web_search_call item's "result" field).
+func buildWebSearchResultArray(content gjson.Result) []byte {
+	arr := []byte(`[]`)
+	if !content.IsArray() {
+		return arr
+	}
+	content.ForEach(func(_, r gjson.Result) bool {
+		entry := []byte(`{}`)
+		entry, _ = sjson.SetBytes(entry, "title", r.Get("title").String())
+		entry, _ = sjson.SetBytes(entry, "url", r.Get("url").String())
+		if enc := r.Get("encrypted_content"); enc.Exists() {
+			entry, _ = sjson.SetBytes(entry, "encrypted_content", enc.String())
+		}
+		if pageAge := r.Get("page_age"); pageAge.Exists() && pageAge.Type != gjson.Null {
+			entry, _ = sjson.SetBytes(entry, "page_age", pageAge.String())
+		}
+		arr, _ = sjson.SetRawBytes(arr, "-1", entry)
+		return true
+	})
+	return arr
+}
 
 func pickRequestJSON(originalRequestRawJSON, requestRawJSON []byte) []byte {
 	if len(originalRequestRawJSON) > 0 && gjson.ValidBytes(originalRequestRawJSON) {
@@ -97,6 +149,9 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 			st.InputTokens = 0
 			st.OutputTokens = 0
 			st.UsageSeen = false
+			st.WebSearchID = ""
+			st.WebSearchQuery = ""
+			st.WebSearchItems = nil
 			if usage := msg.Get("usage"); usage.Exists() {
 				if v := usage.Get("input_tokens"); v.Exists() {
 					st.InputTokens = v.Int()
@@ -150,7 +205,7 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 			item, _ = sjson.SetBytes(item, "output_index", idx)
 			item, _ = sjson.SetBytes(item, "item.id", fmt.Sprintf("fc_%s", st.CurrentFCID))
 			item, _ = sjson.SetBytes(item, "item.call_id", st.CurrentFCID)
-			item, _ = sjson.SetBytes(item, "item.name", name)
+			item = setMcpToolNameOnItem(item, "item", name)
 			out = append(out, emitEvent("response.output_item.added", item))
 			if st.FuncArgsBuf[idx] == nil {
 				st.FuncArgsBuf[idx] = &strings.Builder{}
@@ -176,6 +231,30 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 			part, _ = sjson.SetBytes(part, "output_index", idx)
 			out = append(out, emitEvent("response.reasoning_summary_part.added", part))
 			st.ReasoningPartAdded = true
+		} else if typ == "server_tool_use" && cb.Get("name").String() == webSearchToolName {
+			// Anthropic server_tool_use(web_search): input arrives complete here
+			// (no input_json_delta), so emit an in_progress web_search_call item.
+			st.WebSearchID = cb.Get("id").String()
+			st.WebSearchQuery = cb.Get("input.query").String()
+			item := buildWebSearchCallItem(st.WebSearchID, st.WebSearchQuery, "in_progress", nil)
+			added := []byte(`{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{}}`)
+			added, _ = sjson.SetBytes(added, "sequence_number", nextSeq())
+			added, _ = sjson.SetBytes(added, "output_index", idx)
+			added, _ = sjson.SetRawBytes(added, "item", item)
+			out = append(out, emitEvent("response.output_item.added", added))
+		} else if typ == "web_search_tool_result" {
+			// Anthropic web_search_tool_result: results arrive complete here. Emit a
+			// completed web_search_call item carrying the mapped results.
+			results := buildWebSearchResultArray(cb.Get("content"))
+			item := buildWebSearchCallItem(st.WebSearchID, st.WebSearchQuery, "completed", results)
+			st.WebSearchItems = append(st.WebSearchItems, item)
+			done := []byte(`{"type":"response.output_item.done","sequence_number":0,"output_index":0,"item":{}}`)
+			done, _ = sjson.SetBytes(done, "sequence_number", nextSeq())
+			done, _ = sjson.SetBytes(done, "output_index", idx)
+			done, _ = sjson.SetRawBytes(done, "item", item)
+			out = append(out, emitEvent("response.output_item.done", done))
+			st.WebSearchID = ""
+			st.WebSearchQuery = ""
 		}
 	case "content_block_delta":
 		d := root.Get("delta")
@@ -260,7 +339,7 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 			itemDone, _ = sjson.SetBytes(itemDone, "item.id", fmt.Sprintf("fc_%s", st.CurrentFCID))
 			itemDone, _ = sjson.SetBytes(itemDone, "item.arguments", args)
 			itemDone, _ = sjson.SetBytes(itemDone, "item.call_id", st.CurrentFCID)
-			itemDone, _ = sjson.SetBytes(itemDone, "item.name", st.FuncNames[idx])
+			itemDone = setMcpToolNameOnItem(itemDone, "item", st.FuncNames[idx])
 			out = append(out, emitEvent("response.output_item.done", itemDone))
 			st.InFuncBlock = false
 		} else if st.ReasoningActive {
@@ -409,9 +488,13 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 				item, _ = sjson.SetBytes(item, "id", fmt.Sprintf("fc_%s", callID))
 				item, _ = sjson.SetBytes(item, "arguments", args)
 				item, _ = sjson.SetBytes(item, "call_id", callID)
-				item, _ = sjson.SetBytes(item, "name", name)
+				item = setMcpToolNameOnItem(item, "", name)
 				outputsWrapper, _ = sjson.SetRawBytes(outputsWrapper, "arr.-1", item)
 			}
+		}
+		// web_search_call items (completed during the message)
+		for _, item := range st.WebSearchItems {
+			outputsWrapper, _ = sjson.SetRawBytes(outputsWrapper, "arr.-1", item)
 		}
 		if gjson.GetBytes(outputsWrapper, "arr.#").Int() > 0 {
 			completed, _ = sjson.SetRawBytes(completed, "response.output", []byte(gjson.GetBytes(outputsWrapper, "arr").Raw))
@@ -488,6 +571,13 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 	}
 	toolCalls := make(map[int]*toolState)
 
+	// web_search aggregation (server_tool_use + web_search_tool_result)
+	var (
+		webSearchID    string
+		webSearchQuery string
+		webSearchItems [][]byte
+	)
+
 	// Walk through SSE chunks to fill state
 	for _, ch := range chunks {
 		root := gjson.ParseBytes(ch)
@@ -525,6 +615,16 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 			case "thinking":
 				reasoningActive = true
 				reasoningItemID = fmt.Sprintf("rs_%s_%d", responseID, idx)
+			case "server_tool_use":
+				if cb.Get("name").String() == webSearchToolName {
+					webSearchID = cb.Get("id").String()
+					webSearchQuery = cb.Get("input.query").String()
+				}
+			case "web_search_tool_result":
+				results := buildWebSearchResultArray(cb.Get("content"))
+				webSearchItems = append(webSearchItems, buildWebSearchCallItem(webSearchID, webSearchQuery, "completed", results))
+				webSearchID = ""
+				webSearchQuery = ""
 			}
 
 		case "content_block_delta":
@@ -672,9 +772,12 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 			item, _ = sjson.SetBytes(item, "id", fmt.Sprintf("fc_%s", st.id))
 			item, _ = sjson.SetBytes(item, "arguments", args)
 			item, _ = sjson.SetBytes(item, "call_id", st.id)
-			item, _ = sjson.SetBytes(item, "name", st.name)
+			item = setMcpToolNameOnItem(item, "", st.name)
 			outputsWrapper, _ = sjson.SetRawBytes(outputsWrapper, "arr.-1", item)
 		}
+	}
+	for _, item := range webSearchItems {
+		outputsWrapper, _ = sjson.SetRawBytes(outputsWrapper, "arr.-1", item)
 	}
 	if gjson.GetBytes(outputsWrapper, "arr.#").Int() > 0 {
 		out, _ = sjson.SetRawBytes(out, "output", []byte(gjson.GetBytes(outputsWrapper, "arr").Raw))
@@ -694,4 +797,118 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 	}
 
 	return out
+}
+
+// setMcpToolNameOnItem splits MCP-style flat tool names ("mcp__SERVER__TOOL")
+// into the leaf tool `name` plus its `namespace` so the Codex tool registry
+// can dispatch the call. Non-MCP names pass through unchanged.
+//
+// itemPrefix is the dotted JSON path prefix to the function_call item being
+// emitted ("item" for streaming events, "" for non-stream output items).
+func setMcpToolNameOnItem(buf []byte, itemPrefix, fullName string) []byte {
+	namespace, leaf := splitMcpFlatName(fullName)
+	nameKey := "name"
+	nsKey := "namespace"
+	if itemPrefix != "" {
+		nameKey = itemPrefix + ".name"
+		nsKey = itemPrefix + ".namespace"
+	}
+	buf, _ = sjson.SetBytes(buf, nameKey, leaf)
+	if namespace != "" {
+		buf, _ = sjson.SetBytes(buf, nsKey, namespace)
+	}
+	return buf
+}
+
+// splitMcpFlatName splits a Codex-style flat namespaced tool name into
+// (namespace, leaf) so the Codex tool registry can dispatch on
+// (namespace, name) instead of treating the joined string as a single name.
+//
+// Codex flattens namespaced tools by joining namespace and child with "__"
+// when emitting them to non-Responses-native protocols (like Anthropic
+// Messages). Both MCP-style namespaces ("mcp__SERVER") and Codex internal
+// namespaces ("multi_agent_v1", "tool_search", "codex_app") use the same
+// "__" separator.
+//
+// Recognized cases:
+//
+//   - "mcp__SERVER__TOOL"               -> ("mcp__SERVER__", "TOOL")
+//   - "multi_agent_v1__spawn_agent"     -> ("multi_agent_v1", "spawn_agent")
+//   - "codex_app__automation_update"    -> ("codex_app", "automation_update")
+//   - "tool_search__tool_search_tool"   -> ("tool_search", "tool_search_tool")
+//
+// Note that MCP namespaces keep their trailing "__" because Codex's MCP
+// registry stores ToolName{namespace="mcp__SERVER__", name="TOOL"} and the
+// dispatcher does an exact tuple match. Codex-internal namespaces (the
+// ones in codexInternalNamespacePrefixes) are registered as
+// ToolName{namespace="multi_agent_v1", name="spawn_agent"} (no trailing
+// underscores), so we must strip them when reversing the flat join.
+//
+// Non-namespaced or unrecognized names pass through as ("", fullName).
+func splitMcpFlatName(fullName string) (string, string) {
+	// Fast path: MCP names always start with "mcp__" and have shape
+	// "mcp__SERVER__TOOL", where SERVER is the second segment.
+	if strings.HasPrefix(fullName, "mcp__") {
+		rest := fullName[len("mcp__"):]
+		idx := strings.Index(rest, "__")
+		if idx <= 0 || idx+2 >= len(rest) {
+			return "", fullName
+		}
+		// New Codex registers MCP namespaces WITHOUT trailing "__"
+		// (key = "mcp__SERVER", name = "TOOL"), so strip the trailing "__".
+		return "mcp__" + rest[:idx], rest[idx+2:]
+	}
+	// General Codex-internal namespaces use a single "__" separator joining
+	// a fixed-name namespace and the leaf tool name. The Codex tool registry
+	// stores them with the bare namespace (no trailing "__"), so the reverse
+	// split must NOT keep the separator inside the namespace.
+	for _, ns := range codexInternalNamespacePrefixes {
+		marker := ns + "__"
+		if strings.HasPrefix(fullName, marker) {
+			leaf := fullName[len(marker):]
+			if leaf == "" {
+				return "", fullName
+			}
+			return ns, leaf
+		}
+	}
+	// Anthropic / Bedrock occasionally strips the "multi_agent_v1__" prefix
+	// from tool_use.name in the response and gives us back the bare leaf
+	// (e.g. "wait_agent", "spawn_agent"). Codex still expects those calls to
+	// carry namespace="multi_agent_v1", so re-attach the namespace based on a
+	// known leaf-name allowlist.
+	if ns, ok := bareCodexInternalLeafToNamespace[fullName]; ok {
+		return ns, fullName
+	}
+	return "", fullName
+}
+
+// bareCodexInternalLeafToNamespace maps the bare leaf names of well-known
+// Codex-internal namespaced tools back to their owning namespace. This is a
+// last-ditch correction for upstream backends that drop the "<ns>__" prefix
+// on the way back. Keep this list aligned with codexInternalNamespacePrefixes.
+var bareCodexInternalLeafToNamespace = map[string]string{
+	// multi_agent_v1
+	"spawn_agent":  "multi_agent_v1",
+	"wait_agent":   "multi_agent_v1",
+	"send_input":   "multi_agent_v1",
+	"resume_agent": "multi_agent_v1",
+	"close_agent":  "multi_agent_v1",
+	// multi_agent_v2 (kept here in case it gets enabled)
+	"followup_task": "multi_agent_v2",
+	"list_agents":   "multi_agent_v2",
+	"send_message":  "multi_agent_v2",
+	// tool_search
+	"tool_search_tool": "tool_search",
+}
+
+// codexInternalNamespacePrefixes lists Codex-internal namespaces that get
+// flattened as "<namespace>__<tool>" when serialized for Anthropic-style
+// backends. Order does not matter for correctness; longer or more-specific
+// names are listed first as a defensive measure.
+var codexInternalNamespacePrefixes = []string{
+	"multi_agent_v1",
+	"multi_agent_v2",
+	"tool_search",
+	"codex_app",
 }

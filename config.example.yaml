@@ -131,6 +131,24 @@ enable-gemini-cli-endpoint: false
 
 # When > 0, emit blank lines every N seconds for non-streaming responses to prevent idle timeouts.
 nonstream-keepalive-interval: 0
+
+# Cross-model fallback for /v1/responses/compact (Codex App context compaction).
+#
+# Codex App locally triggers compaction when its conversation approaches the model's
+# auto-compact token limit, then POSTs to /v1/responses/compact for a server-side
+# summary. Only the OpenAI/Codex executor implements that endpoint upstream — the
+# Claude, Gemini, OpenAI-compat and other executors return 501 Not Implemented,
+# which causes Codex to retry and eventually freeze the chat thread.
+#
+# When set, CPA transparently rewrites the `model` field of the request payload
+# to this fallback model and retries once against the executor that owns it
+# (e.g. gpt-5.4 -> codex_executor). Successful fallback responses carry the
+# `x-cpa-compact-fallback: <original>-><fallback>` response header so operators
+# and clients can observe the substitution.
+#
+# Empty (default) preserves the 501 behaviour. The env var
+# CPA_COMPACT_FALLBACK_MODEL overrides this YAML value at runtime.
+compact-fallback-model: ""
 # Streaming behavior (SSE keep-alives + safe bootstrap retries).
 # streaming:
 #   keepalive-seconds: 15   # Default: 0 (disabled). <= 0 disables keep-alives.

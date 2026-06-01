@@ -13,16 +13,43 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"sort"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	. "github.com/router-for-me/CLIProxyAPI/v7/internal/constant"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
+	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
+
+// compactFallbackEnvVar is the environment variable override for the compact
+// cross-model fallback. When set to a non-empty value it takes precedence over
+// the YAML config field `compact-fallback-model`.
+const compactFallbackEnvVar = "CPA_COMPACT_FALLBACK_MODEL"
+
+// compactFallbackHeader is the response header CPA stamps onto a /v1/responses/compact
+// response when it transparently rewrote the upstream model from an executor that
+// does not implement compaction to one that does. The value is "<original>-><fallback>".
+const compactFallbackHeader = "x-cpa-compact-fallback"
+
+// compactFallbackModel resolves the cross-model fallback model identifier for
+// /v1/responses/compact. Priority: env var (live override) > SDK config.
+// Returns an empty string when no fallback is configured (in which case the
+// original 501 is propagated unchanged).
+func (h *OpenAIResponsesAPIHandler) compactFallbackModel() string {
+	if v := strings.TrimSpace(os.Getenv(compactFallbackEnvVar)); v != "" {
+		return v
+	}
+	if h == nil || h.Cfg == nil {
+		return ""
+	}
+	return strings.TrimSpace(h.Cfg.CompactFallbackModel)
+}
 
 func writeResponsesSSEChunk(w io.Writer, chunk []byte) {
 	if w == nil || len(chunk) == 0 {
@@ -382,6 +409,15 @@ func (h *OpenAIResponsesAPIHandler) Responses(c *gin.Context) {
 		return
 	}
 
+	// DEBUG: dump inbound body to /tmp/cpa_inbound when CPA_INBOUND_DUMP is set.
+	if os.Getenv("CPA_INBOUND_DUMP") != "" {
+		_ = os.MkdirAll("/tmp/cpa_inbound", 0o755)
+		if tf, terr := os.CreateTemp("/tmp/cpa_inbound", "inbound-*.json"); terr == nil {
+			_, _ = tf.Write(rawJSON)
+			_ = tf.Close()
+		}
+	}
+
 	// Check if the client requested a streaming response.
 	streamResult := gjson.GetBytes(rawJSON, "stream")
 	if streamResult.Type == gjson.True {
@@ -426,6 +462,20 @@ func (h *OpenAIResponsesAPIHandler) Compact(c *gin.Context) {
 	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
 	resp, upstreamHeaders, errMsg := h.ExecuteWithAuthManager(cliCtx, h.HandlerType(), modelName, rawJSON, "responses/compact")
 	stopKeepAlive()
+
+	// Cross-model fallback. Codex App requests /v1/responses/compact against
+	// whichever model it is currently chatting with, but only the OpenAI/Codex
+	// executor implements that endpoint upstream — Claude, Gemini, OpenAI-compat
+	// and other executors return 501 Not Implemented. When that happens and a
+	// fallback model is configured, we transparently rewrite the model field
+	// inside the request body and retry exactly once against the fallback's
+	// executor (e.g. claude-opus-4-7-thinking -> gpt-5.4 -> codex_executor).
+	// The /v1/responses/compact response payload describes a summary, so the
+	// client does not need to see which model produced it; we still surface the
+	// substitution via the `x-cpa-compact-fallback` response header so callers
+	// and operators can observe the rewrite.
+	resp, upstreamHeaders, errMsg = h.applyCompactFallback(c, cliCtx, modelName, rawJSON, resp, upstreamHeaders, errMsg)
+
 	if errMsg != nil {
 		h.WriteErrorResponse(c, errMsg)
 		cliCancel(errMsg.Error)
@@ -434,6 +484,79 @@ func (h *OpenAIResponsesAPIHandler) Compact(c *gin.Context) {
 	handlers.WriteUpstreamHeaders(c.Writer.Header(), upstreamHeaders)
 	_, _ = c.Writer.Write(resp)
 	cliCancel()
+}
+
+// applyCompactFallback retries /v1/responses/compact against a configured
+// cross-model fallback when the executor selected for the original model does
+// not implement compaction (HTTP 501). The first return tuple is the response
+// payload / upstream headers / error to surface to the client.
+//
+// Behaviour:
+//   - errMsg != nil && errMsg.StatusCode == 501 && fallback configured && fallback != original:
+//     rewrite payload.model to fallback, retry once. If the retry succeeds the
+//     fallback response and headers replace the originals and the
+//     `x-cpa-compact-fallback` marker is added. If the retry also fails the
+//     retry error replaces the original (operators wanted a fallback and the
+//     fallback failed — surfacing that error is more useful than the original
+//     501).
+//   - Any other condition (no 501, no fallback configured, fallback equals
+//     original) is a no-op — the original tuple is returned unchanged.
+func (h *OpenAIResponsesAPIHandler) applyCompactFallback(
+	c *gin.Context,
+	cliCtx context.Context,
+	originalModel string,
+	originalBody []byte,
+	resp []byte,
+	upstreamHeaders http.Header,
+	errMsg *interfaces.ErrorMessage,
+) ([]byte, http.Header, *interfaces.ErrorMessage) {
+	if errMsg == nil || errMsg.StatusCode != http.StatusNotImplemented {
+		return resp, upstreamHeaders, errMsg
+	}
+	fallback := h.compactFallbackModel()
+	if fallback == "" {
+		log.Warnf("compact: upstream returned 501 for model %q and no fallback is configured; "+
+			"set compact-fallback-model (yaml) or CPA_COMPACT_FALLBACK_MODEL (env) to a model that "+
+			"routes to codex_executor (e.g. gpt-5.4) to enable cross-model fallback",
+			originalModel)
+		return resp, upstreamHeaders, errMsg
+	}
+	if strings.EqualFold(strings.TrimSpace(fallback), strings.TrimSpace(originalModel)) {
+		log.Warnf("compact: fallback model %q equals the original model; refusing to retry to avoid an infinite loop", fallback)
+		return resp, upstreamHeaders, errMsg
+	}
+
+	rewritten, setErr := sjson.SetBytes(originalBody, "model", fallback)
+	if setErr != nil {
+		log.Warnf("compact: failed to rewrite model to fallback %q: %v; returning original 501", fallback, setErr)
+		return resp, upstreamHeaders, errMsg
+	}
+
+	log.Warnf("compact: original model %q does not implement /responses/compact (501); retrying with cross-model fallback %q",
+		originalModel, fallback)
+
+	stopKeepAlive := h.StartNonStreamingKeepAlive(c, cliCtx)
+	retryResp, retryHeaders, retryErr := h.ExecuteWithAuthManager(cliCtx, h.HandlerType(), fallback, rewritten, "responses/compact")
+	stopKeepAlive()
+
+	if retryErr != nil {
+		log.Warnf("compact: cross-model fallback %q also failed (status=%d, err=%v); surfacing fallback error",
+			fallback, retryErr.StatusCode, retryErr.Error)
+		return nil, nil, retryErr
+	}
+
+	if retryHeaders == nil {
+		retryHeaders = http.Header{}
+	}
+	retryHeaders.Set(compactFallbackHeader, fmt.Sprintf("%s->%s", originalModel, fallback))
+	// Also stamp the header directly onto the gin response writer so that
+	// downstream clients see it even when PassthroughHeaders is disabled (in
+	// which case ExecuteWithAuthManager returns nil headers and the upstream
+	// header writer becomes a no-op for everything else).
+	c.Writer.Header().Set(compactFallbackHeader, fmt.Sprintf("%s->%s", originalModel, fallback))
+	log.Infof("compact: cross-model fallback succeeded for %q -> %q (response %d bytes)",
+		originalModel, fallback, len(retryResp))
+	return retryResp, retryHeaders, nil
 }
 
 // handleNonStreamingResponse handles non-streaming chat completion responses

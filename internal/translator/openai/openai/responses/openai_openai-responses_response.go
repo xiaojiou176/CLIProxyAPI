@@ -171,6 +171,7 @@ func buildResponsesCompletedEvent(st *oaiToResponsesState, requestRawJSON []byte
 			item, _ = sjson.SetBytes(item, "arguments", args)
 			item, _ = sjson.SetBytes(item, "call_id", callID)
 			item, _ = sjson.SetBytes(item, "name", name)
+			item = translatorcommon.SetMcpToolNameOnItem(item, "", name)
 			outputItems = append(outputItems, completedOutputItem{index: st.FuncOutputIx[key], raw: item})
 		}
 	}
@@ -489,6 +490,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 							o, _ = sjson.SetBytes(o, "item.id", fmt.Sprintf("fc_%s", effectiveCallID))
 							o, _ = sjson.SetBytes(o, "item.call_id", effectiveCallID)
 							o, _ = sjson.SetBytes(o, "item.name", st.FuncNames[key])
+							o = translatorcommon.SetMcpToolNameOnItem(o, "item", st.FuncNames[key])
 							out = append(out, emitRespEvent("response.output_item.added", o))
 						}
 
@@ -603,6 +605,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponses(ctx context.Context, 
 						itemDone, _ = sjson.SetBytes(itemDone, "item.arguments", args)
 						itemDone, _ = sjson.SetBytes(itemDone, "item.call_id", callID)
 						itemDone, _ = sjson.SetBytes(itemDone, "item.name", st.FuncNames[key])
+						itemDone = translatorcommon.SetMcpToolNameOnItem(itemDone, "item", st.FuncNames[key])
 						out = append(out, emitRespEvent("response.output_item.done", itemDone))
 						st.FuncItemDone[key] = true
 						st.FuncArgsDone[key] = true
@@ -761,6 +764,7 @@ func ConvertOpenAIChatCompletionsResponseToOpenAIResponsesNonStream(_ context.Co
 						item, _ = sjson.SetBytes(item, "arguments", args)
 						item, _ = sjson.SetBytes(item, "call_id", callID)
 						item, _ = sjson.SetBytes(item, "name", name)
+						item = translatorcommon.SetMcpToolNameOnItem(item, "", name)
 						outputsWrapper, _ = sjson.SetRawBytes(outputsWrapper, "arr.-1", item)
 						return true
 					})
