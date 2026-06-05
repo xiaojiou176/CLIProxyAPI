@@ -15,6 +15,22 @@ var codexInternalNamespacePrefixes = []string{
 	"codex_app",
 }
 
+// mcpMultiSegmentHostPrefixes lists MCP server-namespace roots whose flattened
+// namespace itself contains an extra "__" segment beyond the "mcp__<root>"
+// prefix. The Codex "codex_apps" connector host registers each connector as its
+// own namespace ("mcp__codex_apps__<connector>"), so the flat join
+// "mcp__codex_apps__<connector>__<leaf>" must be split AFTER the connector
+// segment, not after the root.
+//
+// This matters because the split is otherwise ambiguous from the flat string
+// alone: "mcp__A__B__C" could be (ns="mcp__A", leaf="B__C") or
+// (ns="mcp__A__B", leaf="C"). We only widen the namespace for roots we know are
+// multi-segment connector hosts; every other server keeps the safe
+// two-segment split (first "__" after "mcp__").
+var mcpMultiSegmentHostPrefixes = []string{
+	"codex_apps",
+}
+
 // bareCodexInternalLeafToNamespace maps the bare leaf names of well-known
 // Codex-internal namespaced tools back to their owning namespace, for
 // upstream backends that drop the "<ns>__" prefix on the way back.
@@ -40,6 +56,23 @@ var bareCodexInternalLeafToNamespace = map[string]string{
 func SplitMcpFlatName(fullName string) (string, string) {
 	if strings.HasPrefix(fullName, "mcp__") {
 		rest := fullName[len("mcp__"):]
+		// Known multi-segment hosts (e.g. codex_apps) register each connector
+		// as its own namespace "mcp__<root>__<connector>", so the namespace
+		// boundary is AFTER the connector segment, not after the root.
+		for _, root := range mcpMultiSegmentHostPrefixes {
+			marker := root + "__"
+			if !strings.HasPrefix(rest, marker) {
+				continue
+			}
+			afterRoot := rest[len(marker):]
+			cidx := strings.Index(afterRoot, "__")
+			if cidx <= 0 || cidx+2 >= len(afterRoot) {
+				// No connector/leaf boundary; fall through to the generic
+				// two-segment split below.
+				break
+			}
+			return "mcp__" + root + "__" + afterRoot[:cidx], afterRoot[cidx+2:]
+		}
 		idx := strings.Index(rest, "__")
 		if idx <= 0 || idx+2 >= len(rest) {
 			return "", fullName

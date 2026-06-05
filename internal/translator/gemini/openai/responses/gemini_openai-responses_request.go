@@ -380,9 +380,11 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 		out, _ = sjson.SetRawBytes(out, "contents.-1", userContent)
 	}
 
-	// Convert tools to Gemini functionDeclarations format
+	// Convert tools to Gemini functionDeclarations format, plus native builtins
+	// (e.g. googleSearch for OpenAI web_search).
 	if tools := root.Get("tools"); tools.Exists() && tools.IsArray() {
 		geminiTools := []byte(`[{"functionDeclarations":[]}]`)
+		hasGoogleSearch := false
 
 		tools.ForEach(func(_, tool gjson.Result) bool {
 			switch tool.Get("type").String() {
@@ -399,15 +401,31 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 						return true
 					})
 				}
+			case "web_search":
+				// Gemini natively supports search grounding via the googleSearch
+				// builtin tool. Map the OpenAI Responses web_search tool to a
+				// {"googleSearch":{}} node, which sits alongside the
+				// functionDeclarations object in the Gemini tools array (mirrors
+				// the chat-completions lane's google_search handling).
+				hasGoogleSearch = true
 			default:
 				log.Debugf("gemini openai responses: dropping unsupported tool type %q name %q (cannot map to functionDeclarations)", tool.Get("type").String(), tool.Get("name").String())
 			}
 			return true
 		})
 
-		// Only add tools if there are function declarations
+		// Assemble the final tools array: keep the functionDeclarations object
+		// only when it holds declarations, and append a googleSearch node when
+		// web_search was requested.
+		toolsNode := []byte(`[]`)
 		if funcDecls := gjson.GetBytes(geminiTools, "0.functionDeclarations"); funcDecls.Exists() && len(funcDecls.Array()) > 0 {
-			out, _ = sjson.SetRawBytes(out, "tools", geminiTools)
+			toolsNode, _ = sjson.SetRawBytes(toolsNode, "-1", []byte(gjson.GetBytes(geminiTools, "0").Raw))
+		}
+		if hasGoogleSearch {
+			toolsNode, _ = sjson.SetRawBytes(toolsNode, "-1", []byte(`{"googleSearch":{}}`))
+		}
+		if len(gjson.ParseBytes(toolsNode).Array()) > 0 {
+			out, _ = sjson.SetRawBytes(out, "tools", toolsNode)
 		}
 	}
 

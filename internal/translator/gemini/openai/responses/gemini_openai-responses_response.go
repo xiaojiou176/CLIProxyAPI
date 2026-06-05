@@ -43,6 +43,12 @@ type geminiToResponsesState struct {
 	FuncCallIDs      map[int]string
 	FuncDone         map[int]bool
 	SanitizedNameMap map[string]string
+
+	// web search grounding aggregation (googleSearch builtin)
+	WebSearchSeen  bool
+	WebSearchDone  bool
+	WebSearchIndex int
+	WebSearchItem  []byte
 }
 
 // responseIDCounter provides a process-wide unique counter for synthesized response identifiers.
@@ -50,6 +56,77 @@ var responseIDCounter uint64
 
 // funcCallIDCounter provides a process-wide unique counter for function call identifiers.
 var funcCallIDCounter uint64
+
+// geminiWebSearchCallID synthesizes a stable web_search_call id from a response
+// identifier. Mirrors the Claude lane's "ws_" prefix convention.
+func geminiWebSearchCallID(base string) string {
+	base = strings.TrimPrefix(base, "resp_")
+	if base == "" {
+		return fmt.Sprintf("ws_%x_%d", time.Now().UnixNano(), atomic.AddUint64(&responseIDCounter, 1))
+	}
+	return "ws_" + base
+}
+
+// buildGeminiWebSearchCallItem maps Gemini candidates[*].groundingMetadata into
+// an OpenAI Responses web_search_call output item. It returns nil when there are
+// no search queries (i.e. the model did not actually search via the googleSearch
+// builtin), so a web_search_call is never fabricated when grounding is absent.
+//
+// The host (codex) parses {id?, status?, action:{type:"search",query,queries}}
+// and ignores unknown fields, so the grounding references (title/url) are kept
+// verbatim under the item's "result" field, matching the Claude lane shape.
+func buildGeminiWebSearchCallItem(id string, grounding gjson.Result) []byte {
+	if !grounding.Exists() {
+		return nil
+	}
+	queries := grounding.Get("webSearchQueries")
+	if !queries.IsArray() || len(queries.Array()) == 0 {
+		return nil
+	}
+
+	item := []byte(`{"id":"","type":"web_search_call","status":"completed","action":{"type":"search"}}`)
+	item, _ = sjson.SetBytes(item, "id", id)
+
+	first := ""
+	queries.ForEach(func(_, q gjson.Result) bool {
+		if first == "" {
+			first = q.String()
+		}
+		item, _ = sjson.SetBytes(item, "action.queries.-1", q.String())
+		return true
+	})
+	if first != "" {
+		item, _ = sjson.SetBytes(item, "action.query", first)
+	}
+
+	results := buildGeminiGroundingResultArray(grounding.Get("groundingChunks"))
+	if gjson.ParseBytes(results).IsArray() && len(gjson.ParseBytes(results).Array()) > 0 {
+		item, _ = sjson.SetRawBytes(item, "result", results)
+	}
+	return item
+}
+
+// buildGeminiGroundingResultArray maps Gemini groundingChunks[].web entries into
+// a JSON array of {title,url}, preserving the supporting references returned by
+// the googleSearch builtin (no native OpenAI slot, kept under "result").
+func buildGeminiGroundingResultArray(chunks gjson.Result) []byte {
+	arr := []byte(`[]`)
+	if !chunks.IsArray() {
+		return arr
+	}
+	chunks.ForEach(func(_, c gjson.Result) bool {
+		web := c.Get("web")
+		if !web.Exists() {
+			return true
+		}
+		entry := []byte(`{}`)
+		entry, _ = sjson.SetBytes(entry, "title", web.Get("title").String())
+		entry, _ = sjson.SetBytes(entry, "url", web.Get("uri").String())
+		arr, _ = sjson.SetRawBytes(arr, "-1", entry)
+		return true
+	})
+	return arr
+}
 
 func pickRequestJSON(originalRequestRawJSON, requestRawJSON []byte) []byte {
 	if len(originalRequestRawJSON) > 0 && gjson.ValidBytes(originalRequestRawJSON) {
@@ -382,6 +459,38 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 		})
 	}
 
+	// Web search grounding (googleSearch builtin): when Gemini returns
+	// candidates[0].groundingMetadata, aggregate it into a web_search_call
+	// output item. Emitted once; never fabricated when grounding is absent.
+	if grounding := root.Get("candidates.0.groundingMetadata"); grounding.Exists() && !st.WebSearchDone {
+		if item := buildGeminiWebSearchCallItem(geminiWebSearchCallID(st.ResponseID), grounding); item != nil {
+			// Close any open reasoning/message first to keep event ordering valid.
+			finalizeReasoning()
+			finalizeMessage()
+
+			st.WebSearchSeen = true
+			st.WebSearchIndex = st.NextIndex
+			st.NextIndex++
+			st.WebSearchItem = item
+
+			inProgress := append([]byte(nil), item...)
+			inProgress, _ = sjson.SetBytes(inProgress, "status", "in_progress")
+			added := []byte(`{"type":"response.output_item.added","sequence_number":0,"output_index":0,"item":{}}`)
+			added, _ = sjson.SetBytes(added, "sequence_number", nextSeq())
+			added, _ = sjson.SetBytes(added, "output_index", st.WebSearchIndex)
+			added, _ = sjson.SetRawBytes(added, "item", inProgress)
+			out = append(out, emitEvent("response.output_item.added", added))
+
+			done := []byte(`{"type":"response.output_item.done","sequence_number":0,"output_index":0,"item":{}}`)
+			done, _ = sjson.SetBytes(done, "sequence_number", nextSeq())
+			done, _ = sjson.SetBytes(done, "output_index", st.WebSearchIndex)
+			done, _ = sjson.SetRawBytes(done, "item", item)
+			out = append(out, emitEvent("response.output_item.done", done))
+
+			st.WebSearchDone = true
+		}
+	}
+
 	// Finalization on finishReason
 	if fr := root.Get("candidates.0.finishReason"); fr.Exists() && fr.String() != "" {
 		// Finalize reasoning first to keep ordering tight with last delta
@@ -506,6 +615,10 @@ func ConvertGeminiResponseToOpenAIResponses(_ context.Context, modelName string,
 		// Compose outputs in output_index order.
 		outputsWrapper := []byte(`{"arr":[]}`)
 		for idx := 0; idx < st.NextIndex; idx++ {
+			if st.WebSearchSeen && idx == st.WebSearchIndex {
+				outputsWrapper, _ = sjson.SetRawBytes(outputsWrapper, "arr.-1", st.WebSearchItem)
+				continue
+			}
 			if st.ReasoningOpened && idx == st.ReasoningIndex {
 				item := []byte(`{"id":"","type":"reasoning","encrypted_content":"","summary":[{"type":"summary_text","text":""}]}`)
 				item, _ = sjson.SetBytes(item, "id", st.ReasoningItemID)
@@ -723,6 +836,12 @@ func ConvertGeminiResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 			}
 			return true
 		})
+	}
+
+	// Web search grounding (googleSearch builtin) -> web_search_call output item.
+	// Returns nil (and is therefore skipped) when grounding is absent.
+	if wsc := buildGeminiWebSearchCallItem(geminiWebSearchCallID(id), root.Get("candidates.0.groundingMetadata")); wsc != nil {
+		appendOutput(wsc)
 	}
 
 	// Reasoning output item
