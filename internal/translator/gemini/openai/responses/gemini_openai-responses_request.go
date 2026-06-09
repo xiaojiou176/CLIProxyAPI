@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	sigcompat "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/translator/gemini/common"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	log "github.com/sirupsen/logrus"
@@ -408,6 +409,16 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 				// functionDeclarations object in the Gemini tools array (mirrors
 				// the chat-completions lane's google_search handling).
 				hasGoogleSearch = true
+			case "custom":
+				// Freeform `custom` tools (apply_patch) have no Gemini-native
+				// equivalent. Downgrade to a functionDeclaration carrying a
+				// single string `input` argument; the response side re-emits
+				// the model's functionCall as a custom_tool_call with the bare
+				// input text.
+				funcDecl := buildGeminiResponsesCustomDeclaration(tool)
+				if funcDecl != nil {
+					geminiTools, _ = sjson.SetRawBytes(geminiTools, "0.functionDeclarations.-1", funcDecl)
+				}
 			default:
 				log.Debugf("gemini openai responses: dropping unsupported tool type %q name %q (cannot map to functionDeclarations)", tool.Get("type").String(), tool.Get("name").String())
 			}
@@ -491,6 +502,24 @@ func ConvertOpenAIResponsesRequestToGemini(modelName string, inputRawJSON []byte
 // functionDeclaration from an OpenAI Responses function tool. When overrideName
 // is non-empty it is used as the declaration name (e.g. a namespace-qualified
 // name for flattened children); otherwise the tool's own name is used.
+// buildGeminiResponsesCustomDeclaration downgrades a freeform `custom` tool
+// (e.g. apply_patch) into a Gemini functionDeclaration with a single string
+// `input` parameter, since the freeform tool carries no JSON-Schema of its own.
+func buildGeminiResponsesCustomDeclaration(tool gjson.Result) []byte {
+	name := tool.Get("name").String()
+	if name == "" {
+		name = responsesToolName(tool)
+	}
+	if name == "" {
+		return nil
+	}
+	funcDecl := []byte(`{"name":"","description":"","parametersJsonSchema":{}}`)
+	funcDecl, _ = sjson.SetBytes(funcDecl, "name", util.SanitizeFunctionName(name))
+	funcDecl, _ = sjson.SetBytes(funcDecl, "description", translatorcommon.CustomToolDescription(tool.Get("description").String()))
+	funcDecl, _ = sjson.SetRawBytes(funcDecl, "parametersJsonSchema", translatorcommon.CustomToolFunctionSchema())
+	return funcDecl
+}
+
 func buildGeminiResponsesFunctionDeclaration(tool gjson.Result, overrideName string) []byte {
 	funcDecl := []byte(`{"name":"","description":"","parametersJsonSchema":{}}`)
 

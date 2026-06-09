@@ -3,6 +3,7 @@ package responses
 import (
 	"strings"
 
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -60,7 +61,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 		inputItems := input.Array()
 		outputCallIDs := make(map[string]struct{})
 		for _, item := range inputItems {
-			if item.Get("type").String() != "function_call_output" {
+			if t := item.Get("type").String(); t != "function_call_output" && t != "custom_tool_call_output" {
 				continue
 			}
 			callID := strings.TrimSpace(item.Get("call_id").String())
@@ -189,8 +190,11 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 				}
 				appendRegularMessage(message)
 
-			case "function_call":
+			case "function_call", "custom_tool_call":
 				// Buffer consecutive function calls and emit them as one assistant message.
+				// custom_tool_call is the freeform form (apply_patch): it carries a bare
+				// `input` text instead of JSON `arguments`; wrap it back into the
+				// {"input": ...} object the downgraded function tool expects.
 				toolCall := []byte(`{"id":"","type":"function","function":{"name":"","arguments":""}}`)
 
 				if callId := item.Get("call_id"); callId.Exists() {
@@ -201,7 +205,9 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 					toolCall, _ = sjson.SetBytes(toolCall, "function.name", name.String())
 				}
 
-				if arguments := item.Get("arguments"); arguments.Exists() {
+				if item.Get("type").String() == "custom_tool_call" {
+					toolCall, _ = sjson.SetBytes(toolCall, "function.arguments", translatorcommon.WrapCustomToolInput(item.Get("input").String()))
+				} else if arguments := item.Get("arguments"); arguments.Exists() {
 					toolCall, _ = sjson.SetBytes(toolCall, "function.arguments", arguments.String())
 				}
 				pendingToolCalls = append(pendingToolCalls, gjson.ParseBytes(toolCall).Value())
@@ -209,7 +215,7 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 					pendingToolCallIDs = append(pendingToolCallIDs, callID)
 				}
 
-			case "function_call_output":
+			case "function_call_output", "custom_tool_call_output":
 				// Handle function call output conversion to tool message
 				toolMessage := []byte(`{"role":"tool","tool_call_id":"","content":""}`)
 				callID := ""
@@ -318,6 +324,21 @@ func ConvertOpenAIResponsesRequestToOpenAIChatCompletions(modelName string, inpu
 				return true
 			case "function", "":
 				chatTool := buildChatTool(tool, "")
+				chatCompletionsTools = append(chatCompletionsTools, gjson.ParseBytes(chatTool).Value())
+				return true
+			case "custom":
+				// Freeform `custom` tools (apply_patch) have no chat-completions
+				// equivalent. Downgrade to a function tool carrying a single
+				// string `input` argument; the response side re-emits the
+				// model's tool_call as a custom_tool_call with bare input text.
+				name := strings.TrimSpace(tool.Get("name").String())
+				if name == "" {
+					return true
+				}
+				chatTool := []byte(`{"type":"function","function":{"name":"","description":"","parameters":{}}}`)
+				chatTool, _ = sjson.SetBytes(chatTool, "function.name", name)
+				chatTool, _ = sjson.SetBytes(chatTool, "function.description", translatorcommon.CustomToolDescription(tool.Get("description").String()))
+				chatTool, _ = sjson.SetRawBytes(chatTool, "function.parameters", translatorcommon.CustomToolFunctionSchema())
 				chatCompletionsTools = append(chatCompletionsTools, gjson.ParseBytes(chatTool).Value())
 				return true
 			default:
