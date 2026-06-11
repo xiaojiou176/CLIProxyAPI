@@ -5,8 +5,11 @@ package cliproxy
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"strings"
 	"sync"
@@ -15,6 +18,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/api"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
@@ -29,6 +33,7 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	log "github.com/sirupsen/logrus"
 )
@@ -115,10 +120,30 @@ const (
 	modelRegistrationPhaseOther
 )
 
+const (
+	antigravityModelBaseURLDaily = "https://daily-cloudcode-pa.googleapis.com"
+	antigravityModelBaseURLProd  = "https://cloudcode-pa.googleapis.com"
+	antigravityModelsPath        = "/v1internal:fetchAvailableModels"
+)
+
 type modelRegistrationTask struct {
 	phase    int
 	category string
 	run      func()
+}
+
+type executorRegistrationOptions struct {
+	includeBaseline   bool
+	includePlugins    bool
+	forceReplaceAuths bool
+	auths             []*coreauth.Auth
+}
+
+var registerPluginExecutors = func(host *pluginhost.Host, manager *coreauth.Manager) {
+	if host == nil || manager == nil {
+		return
+	}
+	host.RegisterExecutors(manager, registry.GetGlobalRegistry())
 }
 
 // RegisterUsagePlugin registers a usage plugin on the global usage manager.
@@ -191,8 +216,12 @@ func (s *Service) syncPluginModelRuntime(ctx context.Context) {
 		ctx = context.Background()
 	}
 	s.pluginHost.RegisterModels(ctx, registry.GetGlobalRegistry())
-	s.rebindExecutors()
-	s.pluginHost.RegisterExecutors(s.coreManager, registry.GetGlobalRegistry())
+	s.registerAvailableExecutors(ctx, executorRegistrationOptions{
+		includeBaseline:   s.cfg != nil && s.cfg.Home.Enabled,
+		includePlugins:    true,
+		forceReplaceAuths: true,
+		auths:             s.coreManager.List(),
+	})
 	s.refreshPluginModelRegistrations(ctx)
 	s.coreManager.RefreshSchedulerAll()
 }
@@ -809,6 +838,76 @@ func (s *Service) ensureExecutorsForAuth(a *coreauth.Auth) {
 }
 
 func (s *Service) ensureExecutorsForAuthWithMode(a *coreauth.Auth, forceReplace bool) {
+	if a == nil {
+		return
+	}
+	s.registerAvailableExecutors(context.Background(), executorRegistrationOptions{
+		auths:             []*coreauth.Auth{a},
+		forceReplaceAuths: forceReplace,
+	})
+}
+
+func (s *Service) registerAvailableExecutors(ctx context.Context, opts executorRegistrationOptions) {
+	if s == nil || s.coreManager == nil {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	// Keep all Service-owned executor registration paths here so native, Home,
+	// auth-derived, and plugin executors stay in the same binding order.
+	if opts.includeBaseline {
+		s.registerExecutorsForAuths(baselineExecutorAuths(), true)
+	}
+	if len(opts.auths) > 0 {
+		s.registerExecutorsForAuths(opts.auths, opts.forceReplaceAuths)
+	}
+	if opts.includePlugins && s.pluginHost != nil {
+		registerPluginExecutors(s.pluginHost, s.coreManager)
+	}
+}
+
+func baselineExecutorAuths() []*coreauth.Auth {
+	providers := []string{
+		"codex",
+		"claude",
+		"gemini",
+		"vertex",
+		"gemini-cli",
+		"aistudio",
+		"antigravity",
+		"kimi",
+		"xai",
+		"openai-compatibility",
+	}
+	auths := make([]*coreauth.Auth, 0, len(providers))
+	for _, provider := range providers {
+		auth := &coreauth.Auth{
+			ID:       provider,
+			Provider: provider,
+		}
+		if provider == "openai-compatibility" {
+			auth.Attributes = map[string]string{"compat_name": "openai-compatibility"}
+		}
+		auths = append(auths, auth)
+	}
+	return auths
+}
+
+func (s *Service) registerExecutorsForAuths(auths []*coreauth.Auth, forceReplace bool) {
+	reboundCodex := false
+	for _, auth := range auths {
+		if auth != nil && strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
+			if reboundCodex && forceReplace {
+				continue
+			}
+			reboundCodex = true
+		}
+		s.registerExecutorForAuth(auth, forceReplace)
+	}
+}
+
+func (s *Service) registerExecutorForAuth(a *coreauth.Auth, forceReplace bool) {
 	if s == nil || s.coreManager == nil || a == nil {
 		return
 	}
@@ -902,6 +1001,156 @@ func (s *Service) registerResolvedModelsForAuth(a *coreauth.Auth, providerKey st
 		return
 	}
 	GlobalModelRegistry().RegisterClient(a.ID, providerKey, normalizedModels)
+}
+
+type antigravityFetchAvailableModelsResponse struct {
+	Models            map[string]antigravityFetchedModel `json:"models"`
+	WebSearchModelIDs []string                           `json:"webSearchModelIds"`
+}
+
+type antigravityFetchedModel struct {
+	DisplayName     string `json:"displayName"`
+	MaxTokens       int    `json:"maxTokens"`
+	MaxOutputTokens int    `json:"maxOutputTokens"`
+}
+
+func (s *Service) fetchAntigravityModelsForAuth(ctx context.Context, auth *coreauth.Auth) []*ModelInfo {
+	if auth == nil || auth.Metadata == nil {
+		return nil
+	}
+	accessToken, _ := auth.Metadata["access_token"].(string)
+	accessToken = strings.TrimSpace(accessToken)
+	if accessToken == "" {
+		return nil
+	}
+
+	client := &http.Client{}
+	if transport, _, errProxy := proxyutil.BuildHTTPTransport(s.antigravityModelFetchProxyURL(auth)); errProxy == nil && transport != nil {
+		client.Transport = transport
+	}
+
+	for _, baseURL := range antigravityModelBaseURLs(auth) {
+		req, errReq := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(baseURL, "/")+antigravityModelsPath, strings.NewReader(`{}`))
+		if errReq != nil {
+			continue
+		}
+		req.Close = true
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+accessToken)
+		req.Header.Set("User-Agent", misc.AntigravityUserAgent())
+
+		resp, errDo := client.Do(req)
+		if errDo != nil {
+			continue
+		}
+		body, errRead := io.ReadAll(resp.Body)
+		if errClose := resp.Body.Close(); errClose != nil {
+			log.Debugf("antigravity model fetch: close response body: %v", errClose)
+		}
+		if errRead != nil {
+			continue
+		}
+		if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+			continue
+		}
+		models := parseAntigravityFetchedModels(body)
+		if len(models) > 0 {
+			return models
+		}
+	}
+	return nil
+}
+
+func (s *Service) antigravityModelFetchProxyURL(auth *coreauth.Auth) string {
+	if auth != nil {
+		if proxyURL := strings.TrimSpace(auth.ProxyURL); proxyURL != "" {
+			return proxyURL
+		}
+	}
+	if s != nil && s.cfg != nil {
+		return strings.TrimSpace(s.cfg.ProxyURL)
+	}
+	return ""
+}
+
+func antigravityModelBaseURLs(auth *coreauth.Auth) []string {
+	if baseURL := resolveAntigravityModelBaseURL(auth); baseURL != "" {
+		return []string{baseURL}
+	}
+	return []string{antigravityModelBaseURLDaily, antigravityModelBaseURLProd}
+}
+
+func resolveAntigravityModelBaseURL(auth *coreauth.Auth) string {
+	if auth == nil {
+		return ""
+	}
+	if auth.Attributes != nil {
+		if value := strings.TrimSpace(auth.Attributes["base_url"]); value != "" {
+			return strings.TrimRight(value, "/")
+		}
+	}
+	if auth.Metadata != nil {
+		if value, ok := auth.Metadata["base_url"].(string); ok {
+			value = strings.TrimSpace(value)
+			if value != "" {
+				return strings.TrimRight(value, "/")
+			}
+		}
+	}
+	return ""
+}
+
+func parseAntigravityFetchedModels(body []byte) []*ModelInfo {
+	var parsed antigravityFetchAvailableModelsResponse
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return nil
+	}
+	if len(parsed.Models) == 0 {
+		return nil
+	}
+	webSearchModels := make(map[string]struct{}, len(parsed.WebSearchModelIDs))
+	for _, modelID := range parsed.WebSearchModelIDs {
+		modelID = strings.ToLower(strings.TrimSpace(modelID))
+		if modelID != "" {
+			webSearchModels[modelID] = struct{}{}
+		}
+	}
+	models := make([]*ModelInfo, 0, len(parsed.Models))
+	for rawID, modelData := range parsed.Models {
+		modelID := strings.TrimSpace(rawID)
+		if modelID == "" || isSkippedAntigravityModel(modelID) {
+			continue
+		}
+		displayName := strings.TrimSpace(modelData.DisplayName)
+		if displayName == "" {
+			displayName = modelID
+		}
+		model := &ModelInfo{
+			ID:                  modelID,
+			Object:              "model",
+			OwnedBy:             "antigravity",
+			Type:                "antigravity",
+			DisplayName:         displayName,
+			Name:                modelID,
+			Description:         displayName,
+			ContextLength:       modelData.MaxTokens,
+			MaxCompletionTokens: modelData.MaxOutputTokens,
+		}
+		if _, ok := webSearchModels[strings.ToLower(modelID)]; ok {
+			model.SupportsWebSearch = true
+		}
+		models = append(models, model)
+	}
+	return models
+}
+
+func isSkippedAntigravityModel(modelID string) bool {
+	switch strings.TrimSpace(modelID) {
+	case "chat_20706", "chat_23310", "tab_flash_lite_preview", "tab_jump_flash_lite_preview", "gemini-2.5-flash-thinking", "gemini-2.5-pro":
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Service) pluginModelsForProvider(providerKey string) []*ModelInfo {
@@ -1015,24 +1264,6 @@ func (s *Service) tryRegisterPluginModelsForAuth(ctx context.Context, a *coreaut
 	return true
 }
 
-// rebindExecutors refreshes provider executors so they observe the latest configuration.
-func (s *Service) rebindExecutors() {
-	if s == nil || s.coreManager == nil {
-		return
-	}
-	auths := s.coreManager.List()
-	reboundCodex := false
-	for _, auth := range auths {
-		if auth != nil && strings.EqualFold(strings.TrimSpace(auth.Provider), "codex") {
-			if reboundCodex {
-				continue
-			}
-			reboundCodex = true
-		}
-		s.ensureExecutorsForAuthWithMode(auth, true)
-	}
-}
-
 func (s *Service) applyConfigUpdate(newCfg *config.Config) {
 	if s == nil {
 		return
@@ -1117,10 +1348,15 @@ func (s *Service) applyConfigUpdate(newCfg *config.Config) {
 		s.coreManager.SetConfig(newCfg)
 		s.coreManager.SetOAuthModelAlias(newCfg.OAuthModelAlias)
 	}
-	if newCfg.Home.Enabled {
-		s.registerHomeExecutors()
+	var auths []*coreauth.Auth
+	if s.coreManager != nil {
+		auths = s.coreManager.List()
 	}
-	s.rebindExecutors()
+	s.registerAvailableExecutors(context.Background(), executorRegistrationOptions{
+		includeBaseline:   newCfg.Home.Enabled,
+		forceReplaceAuths: true,
+		auths:             auths,
+	})
 	ctx := context.Background()
 	s.registerConfigAPIKeyAuths(ctx, newCfg)
 	s.syncPluginRuntime(ctx)
@@ -1176,24 +1412,6 @@ func forceHomeRuntimeConfig(cfg *config.Config) {
 	cfg.EnableGeminiCLIEndpoint = false
 	cfg.RemoteManagement.AllowRemote = false
 	cfg.RemoteManagement.DisableControlPanel = true
-}
-
-func (s *Service) registerHomeExecutors() {
-	if s == nil || s.coreManager == nil || s.cfg == nil {
-		return
-	}
-
-	// Register baseline executors so home-dispatched auth entries can execute without
-	// requiring any local auth-dir credentials.
-	s.coreManager.RegisterExecutor(executor.NewCodexAutoExecutor(s.cfg))
-	s.coreManager.RegisterExecutor(executor.NewClaudeExecutor(s.cfg))
-	s.coreManager.RegisterExecutor(executor.NewGeminiExecutor(s.cfg))
-	s.coreManager.RegisterExecutor(executor.NewGeminiVertexExecutor(s.cfg))
-	s.coreManager.RegisterExecutor(executor.NewGeminiCLIExecutor(s.cfg))
-	s.coreManager.RegisterExecutor(executor.NewAIStudioExecutor(s.cfg, "", s.wsGateway))
-	s.coreManager.RegisterExecutor(executor.NewAntigravityExecutor(s.cfg))
-	s.coreManager.RegisterExecutor(executor.NewKimiExecutor(s.cfg))
-	s.coreManager.RegisterExecutor(executor.NewOpenAICompatExecutor("openai-compatibility", s.cfg))
 }
 
 func (s *Service) applyHomeOverlay(remoteCfg *config.Config) {
@@ -1416,7 +1634,9 @@ func (s *Service) Run(ctx context.Context) error {
 
 	s.ensureWebsocketGateway()
 	if homeEnabled {
-		s.registerHomeExecutors()
+		s.registerAvailableExecutors(ctx, executorRegistrationOptions{
+			includeBaseline: true,
+		})
 		// Home mode does not expose in-process Redis RESP usage output; usage is forwarded to home instead.
 		redisqueue.SetEnabled(true)
 	}
@@ -1609,9 +1829,9 @@ func (s *Service) Shutdown(ctx context.Context) error {
 			}
 			s.pluginHost.ApplyConfig(ctx, &config.Config{})
 			s.pluginHost.RegisterModels(ctx, registry.GetGlobalRegistry())
-			if s.coreManager != nil {
-				s.pluginHost.RegisterExecutors(s.coreManager, registry.GetGlobalRegistry())
-			}
+			s.registerAvailableExecutors(ctx, executorRegistrationOptions{
+				includePlugins: true,
+			})
 			s.pluginHost.RegisterFrontendAuthProviders()
 			s.pluginHost.ShutdownAll()
 			if s.accessManager != nil {
@@ -1722,7 +1942,10 @@ func (s *Service) registerModelsForAuth(ctx context.Context, a *coreauth.Auth) {
 		models = registry.GetAIStudioModels()
 		models = applyExcludedModels(models, excluded)
 	case "antigravity":
-		models = registry.GetAntigravityModels()
+		models = s.fetchAntigravityModelsForAuth(ctx, a)
+		if len(models) == 0 {
+			models = registry.GetAntigravityModels()
+		}
 		models = applyExcludedModels(models, excluded)
 	case "claude":
 		models = registry.GetClaudeModels()
