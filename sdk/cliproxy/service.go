@@ -5,11 +5,8 @@ package cliproxy
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
 	"strings"
 	"sync"
@@ -18,7 +15,6 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/api"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
@@ -33,7 +29,6 @@ import (
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	log "github.com/sirupsen/logrus"
 )
@@ -118,12 +113,6 @@ const modelRegistrationMaxWorkersPerCategory = 5
 const (
 	modelRegistrationPhaseConfigAPIKey = iota
 	modelRegistrationPhaseOther
-)
-
-const (
-	antigravityModelBaseURLDaily = "https://daily-cloudcode-pa.googleapis.com"
-	antigravityModelBaseURLProd  = "https://cloudcode-pa.googleapis.com"
-	antigravityModelsPath        = "/v1internal:fetchAvailableModels"
 )
 
 type modelRegistrationTask struct {
@@ -338,20 +327,10 @@ func (s *Service) runModelRegistrationTaskPhase(ctx context.Context, tasks []mod
 }
 
 func modelRegistrationPhase(auth *coreauth.Auth) int {
-	if isConfigAPIKeyAuth(auth) {
+	if coreauth.IsConfigAPIKeyAuth(auth) {
 		return modelRegistrationPhaseConfigAPIKey
 	}
 	return modelRegistrationPhaseOther
-}
-
-func isConfigAPIKeyAuth(auth *coreauth.Auth) bool {
-	if auth == nil || auth.Attributes == nil {
-		return false
-	}
-	if strings.TrimSpace(auth.Attributes["api_key"]) == "" {
-		return false
-	}
-	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(auth.Attributes["source"])), "config:")
 }
 
 func modelRegistrationCategory(auth *coreauth.Auth) string {
@@ -751,6 +730,9 @@ func (s *Service) applyCoreAuthRemoval(ctx context.Context, id string) {
 	if strings.EqualFold(provider, "codex") {
 		executor.CloseCodexWebsocketSessionsForAuthID(id, "auth_removed")
 	}
+	if strings.EqualFold(provider, "xai") {
+		executor.CloseXAIWebsocketSessionsForAuthID(id, "auth_removed")
+	}
 	s.syncPluginRuntime(ctx)
 }
 
@@ -959,7 +941,7 @@ func (s *Service) registerExecutorForAuth(a *coreauth.Auth, forceReplace bool) {
 	case "kimi":
 		s.coreManager.RegisterExecutor(executor.NewKimiExecutor(s.cfg))
 	case "xai":
-		s.coreManager.RegisterExecutor(executor.NewXAIExecutor(s.cfg))
+		s.coreManager.RegisterExecutor(executor.NewXAIAutoExecutor(s.cfg))
 	default:
 		providerKey := strings.ToLower(strings.TrimSpace(a.Provider))
 		if providerKey == "" {
@@ -1001,156 +983,6 @@ func (s *Service) registerResolvedModelsForAuth(a *coreauth.Auth, providerKey st
 		return
 	}
 	GlobalModelRegistry().RegisterClient(a.ID, providerKey, normalizedModels)
-}
-
-type antigravityFetchAvailableModelsResponse struct {
-	Models            map[string]antigravityFetchedModel `json:"models"`
-	WebSearchModelIDs []string                           `json:"webSearchModelIds"`
-}
-
-type antigravityFetchedModel struct {
-	DisplayName     string `json:"displayName"`
-	MaxTokens       int    `json:"maxTokens"`
-	MaxOutputTokens int    `json:"maxOutputTokens"`
-}
-
-func (s *Service) fetchAntigravityModelsForAuth(ctx context.Context, auth *coreauth.Auth) []*ModelInfo {
-	if auth == nil || auth.Metadata == nil {
-		return nil
-	}
-	accessToken, _ := auth.Metadata["access_token"].(string)
-	accessToken = strings.TrimSpace(accessToken)
-	if accessToken == "" {
-		return nil
-	}
-
-	client := &http.Client{}
-	if transport, _, errProxy := proxyutil.BuildHTTPTransport(s.antigravityModelFetchProxyURL(auth)); errProxy == nil && transport != nil {
-		client.Transport = transport
-	}
-
-	for _, baseURL := range antigravityModelBaseURLs(auth) {
-		req, errReq := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(baseURL, "/")+antigravityModelsPath, strings.NewReader(`{}`))
-		if errReq != nil {
-			continue
-		}
-		req.Close = true
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Authorization", "Bearer "+accessToken)
-		req.Header.Set("User-Agent", misc.AntigravityUserAgent())
-
-		resp, errDo := client.Do(req)
-		if errDo != nil {
-			continue
-		}
-		body, errRead := io.ReadAll(resp.Body)
-		if errClose := resp.Body.Close(); errClose != nil {
-			log.Debugf("antigravity model fetch: close response body: %v", errClose)
-		}
-		if errRead != nil {
-			continue
-		}
-		if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-			continue
-		}
-		models := parseAntigravityFetchedModels(body)
-		if len(models) > 0 {
-			return models
-		}
-	}
-	return nil
-}
-
-func (s *Service) antigravityModelFetchProxyURL(auth *coreauth.Auth) string {
-	if auth != nil {
-		if proxyURL := strings.TrimSpace(auth.ProxyURL); proxyURL != "" {
-			return proxyURL
-		}
-	}
-	if s != nil && s.cfg != nil {
-		return strings.TrimSpace(s.cfg.ProxyURL)
-	}
-	return ""
-}
-
-func antigravityModelBaseURLs(auth *coreauth.Auth) []string {
-	if baseURL := resolveAntigravityModelBaseURL(auth); baseURL != "" {
-		return []string{baseURL}
-	}
-	return []string{antigravityModelBaseURLDaily, antigravityModelBaseURLProd}
-}
-
-func resolveAntigravityModelBaseURL(auth *coreauth.Auth) string {
-	if auth == nil {
-		return ""
-	}
-	if auth.Attributes != nil {
-		if value := strings.TrimSpace(auth.Attributes["base_url"]); value != "" {
-			return strings.TrimRight(value, "/")
-		}
-	}
-	if auth.Metadata != nil {
-		if value, ok := auth.Metadata["base_url"].(string); ok {
-			value = strings.TrimSpace(value)
-			if value != "" {
-				return strings.TrimRight(value, "/")
-			}
-		}
-	}
-	return ""
-}
-
-func parseAntigravityFetchedModels(body []byte) []*ModelInfo {
-	var parsed antigravityFetchAvailableModelsResponse
-	if err := json.Unmarshal(body, &parsed); err != nil {
-		return nil
-	}
-	if len(parsed.Models) == 0 {
-		return nil
-	}
-	webSearchModels := make(map[string]struct{}, len(parsed.WebSearchModelIDs))
-	for _, modelID := range parsed.WebSearchModelIDs {
-		modelID = strings.ToLower(strings.TrimSpace(modelID))
-		if modelID != "" {
-			webSearchModels[modelID] = struct{}{}
-		}
-	}
-	models := make([]*ModelInfo, 0, len(parsed.Models))
-	for rawID, modelData := range parsed.Models {
-		modelID := strings.TrimSpace(rawID)
-		if modelID == "" || isSkippedAntigravityModel(modelID) {
-			continue
-		}
-		displayName := strings.TrimSpace(modelData.DisplayName)
-		if displayName == "" {
-			displayName = modelID
-		}
-		model := &ModelInfo{
-			ID:                  modelID,
-			Object:              "model",
-			OwnedBy:             "antigravity",
-			Type:                "antigravity",
-			DisplayName:         displayName,
-			Name:                modelID,
-			Description:         displayName,
-			ContextLength:       modelData.MaxTokens,
-			MaxCompletionTokens: modelData.MaxOutputTokens,
-		}
-		if _, ok := webSearchModels[strings.ToLower(modelID)]; ok {
-			model.SupportsWebSearch = true
-		}
-		models = append(models, model)
-	}
-	return models
-}
-
-func isSkippedAntigravityModel(modelID string) bool {
-	switch strings.TrimSpace(modelID) {
-	case "chat_20706", "chat_23310", "tab_flash_lite_preview", "tab_jump_flash_lite_preview", "gemini-2.5-flash-thinking", "gemini-2.5-pro":
-		return true
-	default:
-		return false
-	}
 }
 
 func (s *Service) pluginModelsForProvider(providerKey string) []*ModelInfo {
@@ -1357,7 +1189,7 @@ func (s *Service) applyConfigUpdate(newCfg *config.Config) {
 		forceReplaceAuths: true,
 		auths:             auths,
 	})
-	ctx := context.Background()
+	ctx := coreauth.WithSkipPersist(context.Background())
 	s.registerConfigAPIKeyAuths(ctx, newCfg)
 	s.syncPluginRuntime(ctx)
 }
@@ -1382,7 +1214,7 @@ func (s *Service) registerConfigAPIKeyAuths(ctx context.Context, cfg *config.Con
 
 	tasks := make([]modelRegistrationTask, 0, len(auths))
 	for _, auth := range auths {
-		if !isConfigAPIKeyAuth(auth) {
+		if !coreauth.IsConfigAPIKeyAuth(auth) {
 			continue
 		}
 		prepared := s.prepareCoreAuthForModelRegistration(ctx, auth)
@@ -1942,10 +1774,8 @@ func (s *Service) registerModelsForAuth(ctx context.Context, a *coreauth.Auth) {
 		models = registry.GetAIStudioModels()
 		models = applyExcludedModels(models, excluded)
 	case "antigravity":
-		models = s.fetchAntigravityModelsForAuth(ctx, a)
-		if len(models) == 0 {
-			models = registry.GetAntigravityModels()
-		}
+		models = registry.GetAntigravityModels()
+		models = applyAntigravityFetchedModelCapabilities(models, s.fetchAntigravityModelCapabilityHintsForAuth(ctx, a))
 		models = applyExcludedModels(models, excluded)
 	case "claude":
 		models = registry.GetClaudeModels()

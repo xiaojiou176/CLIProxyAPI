@@ -148,18 +148,18 @@ func TestRegisterModelsForAuth_AntigravityFetchesWebSearchCapability(t *testing.
 		sawFetch = true
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{
-			"models": {
-				"gemini-3.1-flash-lite": {
-					"displayName": "Gemini 3.1 Flash Lite",
-					"maxTokens": 1048576,
-					"maxOutputTokens": 65535
+				"models": {
+					"gemini-3.1-flash-lite": {
+						"displayName": "Gemini 3.1 Flash Lite",
+						"maxTokens": 1,
+						"maxOutputTokens": 2
+					},
+					"fetched-only-search-model": {
+						"displayName": "Fetched Only Search Model"
+					}
 				},
-				"gemini-3-flash-agent": {
-					"displayName": "Gemini 3 Flash Agent"
-				}
-			},
-			"webSearchModelIds": ["gemini-3.1-flash-lite"]
-		}`))
+				"webSearchModelIds": ["gemini-3.1-flash-lite", "fetched-only-search-model"]
+			}`))
 	}))
 	defer server.Close()
 
@@ -188,7 +188,15 @@ func TestRegisterModelsForAuth_AntigravityFetchesWebSearchCapability(t *testing.
 	}
 
 	models := registry.GetModelsForClient(auth.ID)
-	var webSearchModel, agentModel *internalregistry.ModelInfo
+	staticModels := internalregistry.GetAntigravityModels()
+	staticByID := make(map[string]*internalregistry.ModelInfo, len(staticModels))
+	for _, model := range staticModels {
+		if model != nil {
+			staticByID[model.ID] = model
+		}
+	}
+
+	var webSearchModel, agentModel, staticOnlyModel, fetchedOnlyModel *internalregistry.ModelInfo
 	for _, model := range models {
 		if model == nil {
 			continue
@@ -198,6 +206,10 @@ func TestRegisterModelsForAuth_AntigravityFetchesWebSearchCapability(t *testing.
 			webSearchModel = model
 		case "gemini-3-flash-agent":
 			agentModel = model
+		case "gpt-oss-120b-medium":
+			staticOnlyModel = model
+		case "fetched-only-search-model":
+			fetchedOnlyModel = model
 		}
 	}
 	if webSearchModel == nil {
@@ -206,13 +218,23 @@ func TestRegisterModelsForAuth_AntigravityFetchesWebSearchCapability(t *testing.
 	if !webSearchModel.SupportsWebSearch {
 		t.Fatal("expected gemini-3.1-flash-lite to support web search")
 	}
-	if webSearchModel.ContextLength != 1048576 || webSearchModel.MaxCompletionTokens != 65535 {
-		t.Fatalf("token limits not preserved: %#v", webSearchModel)
+	staticWebSearchModel := staticByID["gemini-3.1-flash-lite"]
+	if staticWebSearchModel == nil {
+		t.Fatal("expected static gemini-3.1-flash-lite definition")
+	}
+	if webSearchModel.ContextLength != staticWebSearchModel.ContextLength || webSearchModel.MaxCompletionTokens != staticWebSearchModel.MaxCompletionTokens {
+		t.Fatalf("static token limits should be preserved, got=%#v static=%#v", webSearchModel, staticWebSearchModel)
 	}
 	if agentModel == nil {
 		t.Fatal("expected gemini-3-flash-agent to be registered")
 	}
 	if agentModel.SupportsWebSearch {
 		t.Fatal("gemini-3-flash-agent should not support web search")
+	}
+	if staticOnlyModel == nil {
+		t.Fatal("expected static-only Antigravity model to remain registered")
+	}
+	if fetchedOnlyModel != nil {
+		t.Fatalf("fetched-only model should not be registered: %#v", fetchedOnlyModel)
 	}
 }

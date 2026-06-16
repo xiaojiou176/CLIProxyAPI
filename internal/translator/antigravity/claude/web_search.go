@@ -24,8 +24,10 @@ type webSearchCitedTextBlock struct {
 	Citations []map[string]any
 }
 
-func antigravityNativeGoogleSearchModel(model string) string {
-	return registry.AntigravityWebSearchModelFor(model)
+const antigravityWebSearchSystemInstruction = "You are a search engine bot. You will be given a query from a user. Your task is to search the web for relevant information that will help the user. You MUST perform a web search. Do not respond or interact with the user, please respond as if they typed the query into a search bar."
+
+func antigravitySupportsNativeGoogleSearch(model string) bool {
+	return registry.AntigravityWebSearchModelFor(model) != ""
 }
 
 func isClaudeTypedWebSearchToolType(toolType string) bool {
@@ -43,6 +45,156 @@ func hasClaudeTypedWebSearchTool(payload []byte) bool {
 		}
 	}
 	return false
+}
+
+func hasOnlyClaudeTypedWebSearchTools(payload []byte) bool {
+	tools := gjson.GetBytes(payload, "tools")
+	if !tools.IsArray() {
+		return false
+	}
+	hasWebSearch := false
+	for _, tool := range tools.Array() {
+		if isClaudeTypedWebSearchToolType(tool.Get("type").String()) {
+			hasWebSearch = true
+			continue
+		}
+		return false
+	}
+	return hasWebSearch
+}
+
+func allowsClaudeWebSearchToolChoice(payload []byte) bool {
+	toolChoice := gjson.GetBytes(payload, "tool_choice")
+	if !toolChoice.Exists() {
+		return true
+	}
+	if toolChoice.Type == gjson.String {
+		switch toolChoice.String() {
+		case "", "auto", "any":
+			return true
+		case "none":
+			return false
+		default:
+			return false
+		}
+	}
+	if !toolChoice.IsObject() {
+		return false
+	}
+	switch toolChoice.Get("type").String() {
+	case "", "auto", "any":
+		return true
+	case "tool":
+		return toolChoice.Get("name").String() == "web_search"
+	default:
+		return false
+	}
+}
+
+func shouldBuildAntigravityWebSearchRequest(model string, payload []byte) bool {
+	return antigravitySupportsNativeGoogleSearch(model) &&
+		hasOnlyClaudeTypedWebSearchTools(payload) &&
+		allowsClaudeWebSearchToolChoice(payload)
+}
+
+func buildAntigravityWebSearchRequest(model string, payload []byte) []byte {
+	query := extractClaudeWebSearchQuery(payload)
+	maxResultCount := extractClaudeWebSearchMaxUses(payload)
+	includedDomains := extractClaudeWebSearchAllowedDomains(payload)
+	out := []byte(`{"model":"","requestType":"web_search","request":{"contents":[{"role":"user","parts":[{"text":""}]}],"systemInstruction":{"role":"user","parts":[{"text":""}]},"tools":[{"googleSearch":{"enhancedContent":{"imageSearch":{"maxResultCount":5}}}}],"generationConfig":{"candidateCount":1}}}`)
+	out, _ = sjson.SetBytes(out, "model", model)
+	out, _ = sjson.SetBytes(out, "request.contents.0.parts.0.text", query)
+	out, _ = sjson.SetBytes(out, "request.systemInstruction.parts.0.text", antigravityWebSearchSystemInstruction)
+	out, _ = sjson.SetBytes(out, "request.tools.0.googleSearch.enhancedContent.imageSearch.maxResultCount", maxResultCount)
+	if len(includedDomains) > 0 {
+		if domainsJSON, err := json.Marshal(includedDomains); err == nil {
+			out, _ = sjson.SetRawBytes(out, "request.tools.0.googleSearch.includedDomains", domainsJSON)
+		}
+	}
+	return out
+}
+
+func extractClaudeWebSearchMaxUses(payload []byte) int64 {
+	const defaultMaxResultCount int64 = 5
+
+	tools := gjson.GetBytes(payload, "tools")
+	if !tools.IsArray() {
+		return defaultMaxResultCount
+	}
+	for _, tool := range tools.Array() {
+		if !isClaudeTypedWebSearchToolType(tool.Get("type").String()) {
+			continue
+		}
+		maxUses := tool.Get("max_uses").Int()
+		if maxUses > 0 {
+			return maxUses
+		}
+	}
+	return defaultMaxResultCount
+}
+
+func extractClaudeWebSearchAllowedDomains(payload []byte) []string {
+	tools := gjson.GetBytes(payload, "tools")
+	if !tools.IsArray() {
+		return nil
+	}
+	for _, tool := range tools.Array() {
+		if !isClaudeTypedWebSearchToolType(tool.Get("type").String()) {
+			continue
+		}
+		allowedDomains := tool.Get("allowed_domains")
+		if !allowedDomains.IsArray() {
+			return nil
+		}
+		domains := make([]string, 0, len(allowedDomains.Array()))
+		for _, domain := range allowedDomains.Array() {
+			if domain.Type != gjson.String {
+				continue
+			}
+			if trimmed := strings.TrimSpace(domain.String()); trimmed != "" {
+				domains = append(domains, trimmed)
+			}
+		}
+		return domains
+	}
+	return nil
+}
+
+func extractClaudeWebSearchQuery(payload []byte) string {
+	messages := gjson.GetBytes(payload, "messages")
+	if !messages.IsArray() {
+		return ""
+	}
+	messageResults := messages.Array()
+	for i := len(messageResults) - 1; i >= 0; i-- {
+		message := messageResults[i]
+		if role := message.Get("role").String(); role != "" && role != "user" {
+			continue
+		}
+		if query := extractClaudeTextContent(message.Get("content")); query != "" {
+			return query
+		}
+	}
+	return ""
+}
+
+func extractClaudeTextContent(content gjson.Result) string {
+	if content.Type == gjson.String {
+		return strings.TrimSpace(content.String())
+	}
+	if !content.IsArray() {
+		return ""
+	}
+	var b strings.Builder
+	for _, part := range content.Array() {
+		if text := strings.TrimSpace(part.Get("text").String()); text != "" {
+			if b.Len() > 0 {
+				b.WriteByte('\n')
+			}
+			b.WriteString(text)
+		}
+	}
+	return strings.TrimSpace(b.String())
 }
 
 func hasAntigravityGoogleSearchTool(payload []byte) bool {
@@ -118,18 +270,26 @@ func webSearchResultsFromGrounding(groundingMetadata gjson.Result) []byte {
 	if !groundingChunks.IsArray() {
 		return results
 	}
+	seenURLs := make(map[string]struct{})
 	for _, chunk := range groundingChunks.Array() {
 		web := chunk.Get("web")
 		if !web.Exists() {
 			continue
 		}
+		uri := strings.TrimSpace(web.Get("uri").String())
+		if uri == "" {
+			continue
+		}
+		if _, ok := seenURLs[uri]; ok {
+			continue
+		}
+		seenURLs[uri] = struct{}{}
+
 		result := []byte(`{"type":"web_search_result","page_age":null}`)
 		if title := web.Get("title"); title.Exists() {
 			result, _ = sjson.SetBytes(result, "title", title.String())
 		}
-		if uri := web.Get("uri"); uri.Exists() {
-			result, _ = sjson.SetBytes(result, "url", uri.String())
-		}
+		result, _ = sjson.SetBytes(result, "url", uri)
 		results, _ = sjson.SetRawBytes(results, "-1", result)
 	}
 	return results
@@ -197,6 +357,9 @@ func buildWebSearchCitedTextBlocks(textContent string, supports []webSearchGroun
 	blocks := make([]webSearchCitedTextBlock, 0, len(supports)+1)
 	lastEnd := int64(0)
 	for _, support := range supports {
+		if support.EndIndex <= lastEnd {
+			continue
+		}
 		if support.StartIndex > lastEnd {
 			start := int(lastEnd)
 			end := min(int(support.StartIndex), len(textBytes))
@@ -204,15 +367,28 @@ func buildWebSearchCitedTextBlocks(textContent string, supports []webSearchGroun
 				blocks = append(blocks, webSearchCitedTextBlock{Text: string(textBytes[start:end])})
 			}
 		}
-		if support.Text != "" && len(support.ChunkURLs) > 0 {
+
+		citedStart := support.StartIndex
+		if citedStart < lastEnd {
+			citedStart = lastEnd
+		}
+		citedText := ""
+		if citedStart < support.EndIndex {
+			start := min(int(citedStart), len(textBytes))
+			end := min(int(support.EndIndex), len(textBytes))
+			if start < end {
+				citedText = string(textBytes[start:end])
+			}
+		}
+		if citedText != "" && len(support.ChunkURLs) > 0 {
 			citation := map[string]any{
 				"type":       "web_search_result_location",
-				"cited_text": support.Text,
+				"cited_text": citedText,
 				"url":        support.ChunkURLs[0],
 				"title":      support.ChunkTitle,
 			}
 			blocks = append(blocks, webSearchCitedTextBlock{
-				Text:      support.Text,
+				Text:      citedText,
 				Citations: []map[string]any{citation},
 			})
 		}

@@ -3,7 +3,6 @@
 package registry
 
 import (
-	"sort"
 	"strings"
 )
 
@@ -86,23 +85,6 @@ func GetAntigravityModels() []*ModelInfo {
 	return cloneModelInfos(getModels().Antigravity)
 }
 
-// AntigravityWebSearchModels returns models listed by
-// fetchAvailableModels.webSearchModelIds.
-func AntigravityWebSearchModels() []string {
-	out := make([]string, 0)
-	for _, model := range GetGlobalRegistry().GetAvailableModelsByProvider("antigravity") {
-		if model == nil || !model.SupportsWebSearch {
-			continue
-		}
-		modelID := normalizeAntigravityCapabilityModelID(model.ID)
-		if modelID != "" {
-			out = append(out, modelID)
-		}
-	}
-	sort.Strings(out)
-	return out
-}
-
 // AntigravityWebSearchModelFor returns the Antigravity model that should run a
 // native web search request for modelID.
 func AntigravityWebSearchModelFor(modelID string) string {
@@ -110,8 +92,6 @@ func AntigravityWebSearchModelFor(modelID string) string {
 	if modelID == "" {
 		return ""
 	}
-	knownAntigravityModel := false
-	webSearchFallback := ""
 	for _, model := range GetGlobalRegistry().GetAvailableModelsByProvider("antigravity") {
 		if model == nil {
 			continue
@@ -121,37 +101,13 @@ func AntigravityWebSearchModelFor(modelID string) string {
 			continue
 		}
 		if currentModelID == modelID {
-			knownAntigravityModel = true
 			if model.SupportsWebSearch {
 				return currentModelID
 			}
+			return ""
 		}
-		if model.SupportsWebSearch && (webSearchFallback == "" || currentModelID < webSearchFallback) {
-			webSearchFallback = currentModelID
-		}
-	}
-	if knownAntigravityModel {
-		return webSearchFallback
 	}
 	return ""
-}
-
-// IsAntigravityWebSearchModel reports whether an Antigravity model is listed by
-// fetchAvailableModels.webSearchModelIds and can run the native googleSearch tool.
-func IsAntigravityWebSearchModel(modelID string) bool {
-	modelID = normalizeAntigravityCapabilityModelID(modelID)
-	if modelID == "" {
-		return false
-	}
-	for _, model := range GetGlobalRegistry().GetAvailableModelsByProvider("antigravity") {
-		if model == nil {
-			continue
-		}
-		if normalizeAntigravityCapabilityModelID(model.ID) == modelID {
-			return model.SupportsWebSearch
-		}
-	}
-	return false
 }
 
 // GetXAIModels returns the standard xAI Grok model definitions.

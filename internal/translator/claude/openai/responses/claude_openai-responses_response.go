@@ -44,13 +44,19 @@ type claudeToResponsesState struct {
 	ReasoningPartAdded bool
 	ReasoningIndex     int
 	// usage aggregation
-	InputTokens  int64
-	OutputTokens int64
-	UsageSeen    bool
 	// web_search aggregation (server_tool_use + web_search_tool_result)
 	WebSearchID    string
 	WebSearchQuery string
 	WebSearchItems [][]byte // completed web_search_call items for output aggregation
+	Usage          claudeResponsesUsageTokens
+}
+
+type claudeResponsesUsageTokens struct {
+	InputTokens              int64
+	OutputTokens             int64
+	CacheCreationInputTokens int64
+	CacheReadInputTokens     int64
+	HasUsage                 bool
 }
 
 var dataTag = []byte("data:")
@@ -101,6 +107,33 @@ func buildWebSearchResultArray(content gjson.Result) []byte {
 		return true
 	})
 	return arr
+}
+
+func (u *claudeResponsesUsageTokens) Merge(usage gjson.Result) {
+	if !usage.Exists() {
+		return
+	}
+	u.HasUsage = true
+	if inputTokens := usage.Get("input_tokens"); inputTokens.Exists() {
+		u.InputTokens = inputTokens.Int()
+	}
+	if outputTokens := usage.Get("output_tokens"); outputTokens.Exists() {
+		u.OutputTokens = outputTokens.Int()
+	}
+	if cacheCreationInputTokens := usage.Get("cache_creation_input_tokens"); cacheCreationInputTokens.Exists() {
+		u.CacheCreationInputTokens = cacheCreationInputTokens.Int()
+	}
+	if cacheReadInputTokens := usage.Get("cache_read_input_tokens"); cacheReadInputTokens.Exists() {
+		u.CacheReadInputTokens = cacheReadInputTokens.Int()
+	}
+}
+
+func (u claudeResponsesUsageTokens) OpenAIResponsesUsage() (inputTokens, outputTokens, totalTokens, cachedTokens int64) {
+	cachedTokens = u.CacheReadInputTokens
+	inputTokens = u.InputTokens + u.CacheCreationInputTokens + cachedTokens
+	outputTokens = u.OutputTokens
+	totalTokens = inputTokens + outputTokens
+	return inputTokens, outputTokens, totalTokens, cachedTokens
 }
 
 func pickRequestJSON(originalRequestRawJSON, requestRawJSON []byte) []byte {
@@ -216,22 +249,11 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 			st.FuncArgsBuf = make(map[int]*strings.Builder)
 			st.FuncNames = make(map[int]string)
 			st.FuncCallIDs = make(map[int]string)
-			st.InputTokens = 0
-			st.OutputTokens = 0
-			st.UsageSeen = false
 			st.WebSearchID = ""
 			st.WebSearchQuery = ""
 			st.WebSearchItems = nil
-			if usage := msg.Get("usage"); usage.Exists() {
-				if v := usage.Get("input_tokens"); v.Exists() {
-					st.InputTokens = v.Int()
-					st.UsageSeen = true
-				}
-				if v := usage.Get("output_tokens"); v.Exists() {
-					st.OutputTokens = v.Int()
-					st.UsageSeen = true
-				}
-			}
+			st.Usage = claudeResponsesUsageTokens{}
+			st.Usage.Merge(msg.Get("usage"))
 			// response.created
 			created := []byte(`{"type":"response.created","sequence_number":0,"response":{"id":"","object":"response","created_at":0,"status":"in_progress","background":false,"error":null,"output":[]}}`)
 			created, _ = sjson.SetBytes(created, "sequence_number", nextSeq())
@@ -500,16 +522,7 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 		}
 		return noSSEOutput(out)
 	case "message_delta":
-		if usage := root.Get("usage"); usage.Exists() {
-			if v := usage.Get("output_tokens"); v.Exists() {
-				st.OutputTokens = v.Int()
-				st.UsageSeen = true
-			}
-			if v := usage.Get("input_tokens"); v.Exists() {
-				st.InputTokens = v.Int()
-				st.UsageSeen = true
-			}
-		}
+		st.Usage.Merge(root.Get("usage"))
 		return [][]byte{}
 	case "message_stop":
 		out = append(out, st.finalizeAssistantMessage(nextSeq)...)
@@ -664,17 +677,17 @@ func ConvertClaudeResponseToOpenAIResponses(ctx context.Context, modelName strin
 		if st.ReasoningBuf.Len() > 0 {
 			reasoningTokens = int64(st.ReasoningBuf.Len() / 4)
 		}
-		usagePresent := st.UsageSeen || reasoningTokens > 0
+		usagePresent := st.Usage.HasUsage || reasoningTokens > 0
 		if usagePresent {
-			completed, _ = sjson.SetBytes(completed, "response.usage.input_tokens", st.InputTokens)
-			completed, _ = sjson.SetBytes(completed, "response.usage.input_tokens_details.cached_tokens", 0)
-			completed, _ = sjson.SetBytes(completed, "response.usage.output_tokens", st.OutputTokens)
+			inputTokens, outputTokens, totalTokens, cachedTokens := st.Usage.OpenAIResponsesUsage()
+			completed, _ = sjson.SetBytes(completed, "response.usage.input_tokens", inputTokens)
+			completed, _ = sjson.SetBytes(completed, "response.usage.input_tokens_details.cached_tokens", cachedTokens)
+			completed, _ = sjson.SetBytes(completed, "response.usage.output_tokens", outputTokens)
 			if reasoningTokens > 0 {
 				completed, _ = sjson.SetBytes(completed, "response.usage.output_tokens_details.reasoning_tokens", reasoningTokens)
 			}
-			total := st.InputTokens + st.OutputTokens
-			if total > 0 || st.UsageSeen {
-				completed, _ = sjson.SetBytes(completed, "response.usage.total_tokens", total)
+			if totalTokens > 0 || st.Usage.HasUsage {
+				completed, _ = sjson.SetBytes(completed, "response.usage.total_tokens", totalTokens)
 			}
 		}
 		out = append(out, emitEvent("response.completed", completed))
@@ -721,8 +734,7 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 		reasoningItemID string
 		reasoningSig    string
 		annotations     []any
-		inputTokens     int64
-		outputTokens    int64
+		usageTokens     claudeResponsesUsageTokens
 	)
 
 	// Per-index tool call aggregation
@@ -755,9 +767,7 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 			if msg := root.Get("message"); msg.Exists() {
 				responseID = msg.Get("id").String()
 				createdAt = time.Now().Unix()
-				if usage := msg.Get("usage"); usage.Exists() {
-					inputTokens = usage.Get("input_tokens").Int()
-				}
+				usageTokens.Merge(msg.Get("usage"))
 			}
 
 		case "content_block_start":
@@ -840,9 +850,7 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 			_ = root
 
 		case "message_delta":
-			if usage := root.Get("usage"); usage.Exists() {
-				outputTokens = usage.Get("output_tokens").Int()
-			}
+			usageTokens.Merge(root.Get("usage"))
 		}
 	}
 
@@ -983,10 +991,11 @@ func ConvertClaudeResponseToOpenAIResponsesNonStream(_ context.Context, _ string
 	}
 
 	// Usage
-	total := inputTokens + outputTokens
+	inputTokens, outputTokens, totalTokens, cachedTokens := usageTokens.OpenAIResponsesUsage()
 	out, _ = sjson.SetBytes(out, "usage.input_tokens", inputTokens)
+	out, _ = sjson.SetBytes(out, "usage.input_tokens_details.cached_tokens", cachedTokens)
 	out, _ = sjson.SetBytes(out, "usage.output_tokens", outputTokens)
-	out, _ = sjson.SetBytes(out, "usage.total_tokens", total)
+	out, _ = sjson.SetBytes(out, "usage.total_tokens", totalTokens)
 	if reasoningBuf.Len() > 0 {
 		// Rough estimate similar to chat completions
 		reasoningTokens := int64(len(reasoningBuf.String()) / 4)
